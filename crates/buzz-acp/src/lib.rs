@@ -1383,6 +1383,12 @@ struct RespawnResult {
 /// Carries enough identity to operate on the right withheld event in
 /// `EventQueue::withheld_native_steer`: `channel_id` is the routing key,
 /// `event_id` is the hex id of the single event the steer carried.
+struct NativeSteerPrepared {
+    channel_id: Uuid,
+    event: nostr::Event,
+    prompt_blocks: Vec<String>,
+}
+
 struct SteerAckEvent {
     channel_id: Uuid,
     event_id: String,
@@ -2142,6 +2148,10 @@ async fn tokio_main() -> Result<()> {
     //      withheld event in `EventQueue::withheld_native_steer` until
     //      `IN_FLIGHT_DEADLINE_SECS` expires.
     let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
+    // Edit-aware native steer enrichment performs bounded REST lookups. Keep it
+    // off the relay select arm, then return the immutable prompt payload here
+    // for queue/pool mutation on the main loop.
+    let (native_steer_tx, mut native_steer_rx) = mpsc::unbounded_channel::<NativeSteerPrepared>();
 
     // ── Step 7: Shutdown signal ───────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
@@ -2216,6 +2226,7 @@ async fn tokio_main() -> Result<()> {
         Result(Box<PromptResult>),
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
+        NativeSteerPrepared(NativeSteerPrepared),
         Wake(u32, Result<AgentPool, String>),
     }
 
@@ -2373,6 +2384,9 @@ async fn tokio_main() -> Result<()> {
                 // locked semantics (Eva + Max + Perci).
                 Some(ack_event) = steer_ack_rx.recv() => {
                     Some(PoolEvent::SteerAck(ack_event))
+                }
+                Some(prepared) = native_steer_rx.recv() => {
+                    Some(PoolEvent::NativeSteerPrepared(prepared))
                 }
                 Some((attempt, result)) = wake_rx.recv(), if config.lazy_pool && !pool_ready => {
                     Some(PoolEvent::Wake(attempt, result))
@@ -2769,17 +2783,46 @@ async fn tokio_main() -> Result<()> {
                                     // to the universal cancel+merge `Steer`
                                     // signal so the event still reaches the
                                     // agent.
-                                    let native_attempted = matches!(signal, ControlSignal::Steer)
-                                        && try_native_steer(
-                                            &mut pool,
-                                            &mut queue,
-                                            buzz_event.channel_id,
-                                            event_for_steer,
-                                            prompt_tag_for_steer,
-                                            &ctx,
-                                            &steer_ack_tx,
-                                        )
-                                        .await;
+                                    let native_attempted = if matches!(signal, ControlSignal::Steer)
+                                    {
+                                        if queue::edit_target_id(&event_for_steer).is_some() {
+                                            let tx = native_steer_tx.clone();
+                                            let ctx = Arc::clone(&ctx);
+                                            let channel_id = buzz_event.channel_id;
+                                            tokio::spawn(async move {
+                                                let prompt_blocks = pool::format_native_steer_prompt(
+                                                    channel_id,
+                                                    event_for_steer.clone(),
+                                                    prompt_tag_for_steer,
+                                                    &ctx,
+                                                )
+                                                .await;
+                                                let _ = tx.send(NativeSteerPrepared {
+                                                    channel_id,
+                                                    event: event_for_steer,
+                                                    prompt_blocks,
+                                                });
+                                            });
+                                            true
+                                        } else {
+                                            let prompt_blocks =
+                                                pool::format_native_steer_prompt_sync(
+                                                    buzz_event.channel_id,
+                                                    &event_for_steer,
+                                                    &prompt_tag_for_steer,
+                                                );
+                                            try_native_steer(
+                                                &mut pool,
+                                                &mut queue,
+                                                buzz_event.channel_id,
+                                                event_for_steer,
+                                                prompt_blocks,
+                                                &steer_ack_tx,
+                                            )
+                                        }
+                                    } else {
+                                        false
+                                    };
                                     if !native_attempted {
                                         signal_in_flight_task(
                                             &mut pool,
@@ -3018,6 +3061,22 @@ async fn tokio_main() -> Result<()> {
                     dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
                 {
                     typing_channels.insert(channel_id, thread_tags);
+                }
+            }
+            Some(PoolEvent::NativeSteerPrepared(NativeSteerPrepared {
+                channel_id,
+                event,
+                prompt_blocks,
+            })) => {
+                if !try_native_steer(
+                    &mut pool,
+                    &mut queue,
+                    channel_id,
+                    event,
+                    prompt_blocks,
+                    &steer_ack_tx,
+                ) {
+                    signal_in_flight_task(&mut pool, channel_id, ControlSignal::Steer);
                 }
             }
             Some(PoolEvent::SteerAck(SteerAckEvent {
@@ -3442,17 +3501,15 @@ fn signal_in_flight_task(
 ///
 /// The withheld event is NOT released here on `false` because no withhold
 /// was established: `mark_native_steer_pending` only runs on `Ok(())`.
-async fn try_native_steer(
+fn try_native_steer(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     channel_id: uuid::Uuid,
     event: nostr::Event,
-    prompt_tag: String,
-    ctx: &PromptContext,
+    prompt_blocks: Vec<String>,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
 ) -> bool {
     let event_id_hex = event.id.to_hex();
-    let prompt_blocks = pool::format_native_steer_prompt(channel_id, event, prompt_tag, ctx).await;
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
