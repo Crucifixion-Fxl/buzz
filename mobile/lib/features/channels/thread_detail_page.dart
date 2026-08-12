@@ -13,6 +13,7 @@ import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
+import 'android_ime_lift.dart';
 import 'channel_link_navigation.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
@@ -23,6 +24,8 @@ import 'compose_bar.dart';
 import 'composer_dock_size_reporter.dart';
 import 'date_formatters.dart';
 import 'day_divider.dart';
+import 'ime_metrics_settle_observer.dart';
+import 'latest_message_button.dart';
 import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_long_press_region.dart';
@@ -33,6 +36,10 @@ import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'small_avatar.dart';
 import 'timeline_message.dart';
+
+part 'thread_detail_page/nested_thread_summary_row.dart';
+part 'thread_detail_page/thread_helpers.dart';
+part 'thread_detail_page/tail_alignment.dart';
 
 /// Full-screen thread detail page.
 ///
@@ -61,6 +68,7 @@ class ThreadDetailPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final composerDockHeight = useState(0.0);
+    final settledImeBottomInset = useState(0.0);
     final sendMessage = ref.read(sendMessageProvider);
     // Relay thread queries are keyed by the outermost root, even when this
     // page displays a nested branch. Query that root, then select this head's
@@ -118,26 +126,74 @@ class ThreadDetailPage extends HookConsumerWidget {
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final didJumpToInitialMessage = useRef(false);
     final followsThreadTail = useRef(false);
-    final pendingTailAlignment = useRef<double?>(null);
+    final isAtThreadTail = useState(true);
     final tailRealignmentQueued = useRef(false);
+    final tailCorrectionInProgress = useRef(false);
+    final appView = View.of(context);
+    final settledImeLift = usesFixedAndroidImeViewport
+        ? (settledImeBottomInset.value -
+                  MediaQuery.viewPaddingOf(context).bottom)
+              .clamp(0.0, double.infinity)
+              .toDouble()
+        : 0.0;
+    final timelineBottomInset =
+        composerDockHeight.value +
+        (followsThreadTail.value ? settledImeLift : 0);
+    final navigationBottomInset = composerDockHeight.value + settledImeLift;
 
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;
     int indexForReply(int chronologicalIndex) => chronologicalIndex + 1;
+    final tailAnchorIndex = replies.length + 1;
+
+    double threadTailAlignment() => _threadTailAlignmentForViewport(
+      fullHeight: MediaQuery.sizeOf(context).height,
+      imeBottomInset: appView.viewInsets.bottom / appView.devicePixelRatio,
+      usesFixedImeViewport: usesFixedAndroidImeViewport,
+      bottomInset:
+          Grid.xs +
+          composerDockHeight.value +
+          (followsThreadTail.value ? settledImeLift : 0),
+    );
 
     bool threadTailIsVisible() {
-      final lastIndex = replies.isEmpty
-          ? headIndex
-          : indexForReply(replies.length - 1);
+      final targetAlignment = threadTailAlignment();
       return itemPositionsListener.itemPositions.value.any(
         (position) =>
-            position.index == lastIndex && position.itemTrailingEdge <= 1.001,
+            position.index == tailAnchorIndex &&
+            position.itemLeadingEdge <= targetAlignment + 0.01,
       );
+    }
+
+    void correctThreadTailInstantly() {
+      if (!itemScrollController.isAttached) return;
+      tailCorrectionInProgress.value = true;
+      isAtThreadTail.value = true;
+      itemScrollController.jumpTo(
+        index: tailAnchorIndex,
+        alignment: threadTailAlignment(),
+      );
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        tailCorrectionInProgress.value = false;
+        if (context.mounted && followsThreadTail.value) {
+          isAtThreadTail.value = true;
+        }
+      });
+    }
+
+    void followThreadTailFromComposer() {
+      followsThreadTail.value = true;
+      if (!threadTailIsVisible()) correctThreadTailInstantly();
     }
 
     useEffect(() {
       void onPositionsChanged() {
-        if (threadTailIsVisible()) followsThreadTail.value = true;
+        final tailIsVisible = threadTailIsVisible();
+        if (tailIsVisible) followsThreadTail.value = true;
+        if (tailCorrectionInProgress.value) return;
+        if (isAtThreadTail.value != tailIsVisible) {
+          isAtThreadTail.value = tailIsVisible;
+        }
       }
 
       itemPositionsListener.itemPositions.addListener(onPositionsChanged);
@@ -145,6 +201,20 @@ class ThreadDetailPage extends HookConsumerWidget {
         onPositionsChanged,
       );
     }, [itemPositionsListener, replies.length]);
+
+    Future<void> scrollToThreadLatest() async {
+      if (!itemScrollController.isAttached) return;
+      followsThreadTail.value = true;
+      await itemScrollController.scrollTo(
+        index: tailAnchorIndex,
+        alignment: threadTailAlignment(),
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      );
+      if (context.mounted && threadTailIsVisible()) {
+        isAtThreadTail.value = true;
+      }
+    }
 
     useEffect(() {
       final messageId = initialMessageId;
@@ -166,7 +236,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         // the tail. This authoritative deep-link jump intentionally leaves
         // the user at an older item, so it must opt out of follow-tail first.
         followsThreadTail.value = false;
-        pendingTailAlignment.value = null;
+        isAtThreadTail.value = false;
         itemScrollController.jumpTo(index: targetIndex, alignment: 0.35);
         didJumpToInitialMessage.value = true;
       });
@@ -178,6 +248,35 @@ class ThreadDetailPage extends HookConsumerWidget {
     // while the last item is on screen, scroll it into view. If the user has
     // scrolled up to read, leave them where they are.
     final hasFetchedReplies = fetchedReplies != null;
+    final didPlaceNormalEntryAtTail = useRef(false);
+    useEffect(() {
+      if (!hasFetchedReplies ||
+          initialMessageId != null ||
+          didPlaceNormalEntryAtTail.value) {
+        return null;
+      }
+      didPlaceNormalEntryAtTail.value = true;
+      var remainingLayoutFrames = 2;
+      void placeAfterLayout(Duration _) {
+        if (!context.mounted) return;
+        if (!itemScrollController.isAttached ||
+            itemPositionsListener.itemPositions.value.isEmpty) {
+          if (remainingLayoutFrames > 0) {
+            remainingLayoutFrames -= 1;
+            WidgetsBinding.instance.addPostFrameCallback(placeAfterLayout);
+          }
+          return;
+        }
+        followsThreadTail.value = true;
+        if (!threadTailIsVisible()) {
+          correctThreadTailInstantly();
+        }
+        isAtThreadTail.value = true;
+      }
+
+      WidgetsBinding.instance.addPostFrameCallback(placeAfterLayout);
+      return null;
+    }, [hasFetchedReplies, initialMessageId, replies.length]);
     final didEstablishInitialReplies = useRef(hasFetchedReplies);
     final previousReplyCount = useRef(replies.length);
     useEffect(() {
@@ -194,16 +293,15 @@ class ThreadDetailPage extends HookConsumerWidget {
       previousReplyCount.value = replies.length;
       if (replies.length <= previous) return null;
       final positions = itemPositionsListener.itemPositions.value;
-      final lastIndex = indexForReply(replies.length - 1);
       // Positions still describe the list as it was *before* these replies, so
       // compare against the old tail. Measuring against the new one only reads
       // as "at the tail" when exactly one reply arrived.
-      final previousLastIndex = previous == 0
-          ? headIndex
-          : indexForReply(previous - 1);
+      final previousTailAnchorIndex = previous + 1;
       final wasAtTail =
           positions.isEmpty ||
-          positions.any((position) => position.index >= previousLastIndex);
+          positions.any(
+            (position) => position.index >= previousTailAnchorIndex,
+          );
       final localPubkey = currentPubkey?.toLowerCase();
       final hasNewLocalReply =
           localPubkey != null &&
@@ -214,13 +312,12 @@ class ThreadDetailPage extends HookConsumerWidget {
       // reading at the head of a long thread. Remote arrivals still respect
       // the user's scroll position.
       if (!wasAtTail && !hasNewLocalReply) return null;
+      followsThreadTail.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
-        itemScrollController.scrollTo(
-          index: lastIndex,
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOutCubic,
-        );
+        // A reply arrival changes list geometry. Keep this correction instant;
+        // only an explicit tap on Latest should animate navigation.
+        correctThreadTailInstantly();
       });
       return null;
     }, [hasFetchedReplies, replies.length]);
@@ -260,39 +357,6 @@ class ThreadDetailPage extends HookConsumerWidget {
     // itself a root message its rootId is null, so fall back to its own id.
     final effectiveRootId = threadHead.rootId ?? threadHead.id;
 
-    void updateComposerDockHeight(double height) {
-      final previousHeight = composerDockHeight.value;
-      final heightDelta = height - previousHeight;
-      if (heightDelta.abs() < 0.5) return;
-
-      final shouldFollowTail = followsThreadTail.value || threadTailIsVisible();
-      if (shouldFollowTail) followsThreadTail.value = true;
-      composerDockHeight.value = height;
-      if (heightDelta <= 0 || !shouldFollowTail) {
-        pendingTailAlignment.value = null;
-        return;
-      }
-      final lastIndex = replies.isEmpty
-          ? headIndex
-          : indexForReply(replies.length - 1);
-      final lastPosition = itemPositionsListener.itemPositions.value
-          .where((position) => position.index == lastIndex)
-          .firstOrNull;
-      if (lastPosition == null) return;
-      final targetAlignment =
-          (pendingTailAlignment.value ?? lastPosition.itemLeadingEdge) -
-          (heightDelta / MediaQuery.sizeOf(context).height);
-      pendingTailAlignment.value = targetAlignment;
-
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!context.mounted || !itemScrollController.isAttached) return;
-        itemScrollController.jumpTo(
-          index: lastIndex,
-          alignment: targetAlignment,
-        );
-      });
-    }
-
     // Composer size changes and keyboard metrics changes are independent:
     // the dock grows first, then the Scaffold's viewport shrinks once the
     // keyboard appears. Re-align after that latter layout pass too, but only
@@ -309,24 +373,65 @@ class ThreadDetailPage extends HookConsumerWidget {
             !followsThreadTail.value) {
           return;
         }
-        final lastIndex = replies.isEmpty
-            ? headIndex
-            : indexForReply(replies.length - 1);
-        itemScrollController.scrollTo(
-          index: lastIndex,
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOutCubic,
+        final targetAlignment = threadTailAlignment();
+        final positions = itemPositionsListener.itemPositions.value;
+        final anchorPosition = positions
+            .where((position) => position.index == tailAnchorIndex)
+            .firstOrNull;
+        final headIsVisible = positions.any(
+          (position) =>
+              position.index == headIndex && position.itemTrailingEdge > 0,
         );
+        if (anchorPosition != null &&
+            ((anchorPosition.itemLeadingEdge - targetAlignment).abs() < 0.005 ||
+                (headIsVisible &&
+                    anchorPosition.itemLeadingEdge < targetAlignment))) {
+          return;
+        }
+        // This runs once after Android's frame-by-frame IME metrics settle.
+        // Keep the resulting layout correction instant.
+        correctThreadTailInstantly();
       });
     }
 
+    void updateComposerDockHeight(double height) {
+      final previousHeight = composerDockHeight.value;
+      final heightDelta = height - previousHeight;
+      if (heightDelta.abs() < 0.5) return;
+
+      final shouldFollowTail = followsThreadTail.value || threadTailIsVisible();
+      if (shouldFollowTail) followsThreadTail.value = true;
+      composerDockHeight.value = height;
+      if (shouldFollowTail) realignThreadTailAfterMetricsChange();
+    }
+
     useEffect(() {
-      final observer = _ThreadTailMetricsObserver(
-        onMetricsChanged: realignThreadTailAfterMetricsChange,
+      final observer = ImeMetricsSettleObserver(
+        onMetricsSettled: () {
+          if (!usesFixedAndroidImeViewport) {
+            realignThreadTailAfterMetricsChange();
+            return;
+          }
+          final nextInset =
+              appView.viewInsets.bottom / appView.devicePixelRatio;
+          if ((settledImeBottomInset.value - nextInset).abs() >= 0.5) {
+            settledImeBottomInset.value = nextInset;
+          }
+        },
       );
       WidgetsBinding.instance.addObserver(observer);
-      return () => WidgetsBinding.instance.removeObserver(observer);
-    }, [itemScrollController, replies.length]);
+      return () {
+        WidgetsBinding.instance.removeObserver(observer);
+        observer.dispose();
+      };
+    }, [appView, itemScrollController, replies.length]);
+
+    useEffect(() {
+      if (usesFixedAndroidImeViewport) {
+        realignThreadTailAfterMetricsChange();
+      }
+      return null;
+    }, [settledImeBottomInset.value]);
 
     // Channel names for message content rendering.
     final channelsAsync = ref.watch(channelsProvider);
@@ -338,6 +443,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     });
 
     return FrostedScaffold(
+      resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
       appBar: const FrostedAppBar(
         title: Text('Thread'),
         titleStyle: channelTitleTextStyle,
@@ -351,7 +457,6 @@ class ThreadDetailPage extends HookConsumerWidget {
                 child: KeyboardDismissOnDrag(
                   onUserScrollStart: () {
                     followsThreadTail.value = false;
-                    pendingTailAlignment.value = null;
                   },
                   child: ScrollablePositionedList.builder(
                     key: const ValueKey('thread-message-list'),
@@ -365,10 +470,20 @@ class ThreadDetailPage extends HookConsumerWidget {
                       left: Grid.gutter,
                       right: Grid.gutter,
                       top: frostedAppBarHeight(context),
-                      bottom: Grid.xs + composerDockHeight.value,
+                      bottom: Grid.xs + timelineBottomInset,
                     ),
-                    itemCount: replies.length + 1, // +1 for thread head
+                    // Head + replies + a stable zero-content tail target. The
+                    // anchor lets Latest align the end directly rather than
+                    // asking the final reply's leading edge to overshoot the
+                    // viewport and rebound against the scroll extent.
+                    itemCount: replies.length + 2,
                     itemBuilder: (context, index) {
+                      if (index == tailAnchorIndex) {
+                        return const SizedBox(
+                          key: ValueKey('thread-tail-anchor'),
+                          height: 1,
+                        );
+                      }
                       if (index == headIndex) {
                         if (liveDeletionHidesHead) {
                           return const Padding(
@@ -507,44 +622,60 @@ class ThreadDetailPage extends HookConsumerWidget {
             ],
           ),
           if (isMember && !isArchived)
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: ComposerDockSizeReporter(
-                key: const ValueKey('thread-composer-dock'),
-                onHeightChanged: updateComposerDockHeight,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    AnimatedSize(
-                      duration: MediaQuery.disableAnimationsOf(context)
-                          ? Duration.zero
-                          : const Duration(milliseconds: 180),
-                      curve: Curves.easeOutCubic,
-                      alignment: Alignment.bottomCenter,
-                      child: threadTyping.isEmpty
-                          ? const SizedBox.shrink()
-                          : ChannelTypingIndicator(entries: threadTyping),
-                    ),
-                    ComposeBar(
-                      channelId: channelId,
-                      hintText: 'Reply in thread\u2026',
-                      threadHeadId: threadHead.id,
-                      rootId: effectiveRootId,
-                      onSend:
-                          (
-                            content,
-                            mentionPubkeys, {
-                            mediaTags = const <List<String>>[],
-                          }) => sendMessage.call(
-                            channelId: channelId,
-                            content: content,
-                            mentionPubkeys: mentionPubkeys,
-                            parentEventId: threadHead.id,
-                            rootEventId: effectiveRootId,
-                            mediaTags: mediaTags,
-                          ),
-                    ),
-                  ],
+            AndroidImeLift(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: ComposerDockSizeReporter(
+                  key: const ValueKey('thread-composer-dock'),
+                  onHeightChanged: updateComposerDockHeight,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      AnimatedSize(
+                        duration: MediaQuery.disableAnimationsOf(context)
+                            ? Duration.zero
+                            : const Duration(milliseconds: 180),
+                        curve: Curves.easeOutCubic,
+                        alignment: Alignment.bottomCenter,
+                        child: threadTyping.isEmpty
+                            ? const SizedBox.shrink()
+                            : ChannelTypingIndicator(entries: threadTyping),
+                      ),
+                      ComposeBar(
+                        channelId: channelId,
+                        hintText: 'Reply in thread\u2026',
+                        threadHeadId: threadHead.id,
+                        rootId: effectiveRootId,
+                        onFocusRequested: followThreadTailFromComposer,
+                        onSend:
+                            (
+                              content,
+                              mentionPubkeys, {
+                              mediaTags = const <List<String>>[],
+                            }) => sendMessage.call(
+                              channelId: channelId,
+                              content: content,
+                              mentionPubkeys: mentionPubkeys,
+                              parentEventId: threadHead.id,
+                              rootEventId: effectiveRootId,
+                              mediaTags: mediaTags,
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          if (!isAtThreadTail.value)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: navigationBottomInset + Grid.xs,
+              child: Center(
+                child: LatestMessageButton(
+                  key: const ValueKey('thread-jump-to-latest'),
+                  surfaceKey: const ValueKey('thread-jump-to-latest-surface'),
+                  onPressed: scrollToThreadLatest,
                 ),
               ),
             ),
@@ -552,163 +683,6 @@ class ThreadDetailPage extends HookConsumerWidget {
       ),
     );
   }
-}
-
-bool _isDeletedBy(Iterable<NostrEvent> events, String messageId) {
-  for (final event in events) {
-    if (event.kind != EventKind.deletion &&
-        event.kind != EventKind.nip29DeleteEvent) {
-      continue;
-    }
-    if (event.tags.any(
-      (tag) => tag.length >= 2 && tag[0] == 'e' && tag[1] == messageId,
-    )) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/// Build a lightweight summary for a nested thread (reply that has its own
-/// replies). Same logic as the top-level [ThreadSummary] but kept local to
-/// avoid coupling.
-ThreadSummary _buildNestedSummary(
-  String messageId,
-  List<TimelineMessage> children,
-) {
-  final seen = <String>{};
-  final participants = <String>[];
-  for (var i = children.length - 1; i >= 0 && participants.length < 3; i--) {
-    final pk = children[i].pubkey.toLowerCase();
-    if (seen.add(pk)) participants.add(pk);
-  }
-  return ThreadSummary(
-    threadHeadId: messageId,
-    replyCount: children.length,
-    participantPubkeys: participants.reversed.toList(),
-    lastReplyAt: children.last.createdAt,
-  );
-}
-
-/// Tappable summary row shown below a reply that itself has replies.
-/// Pushes a new [ThreadDetailPage] for the nested thread.
-class _NestedThreadSummaryRow extends ConsumerWidget {
-  final ThreadSummary summary;
-  final TimelineMessage replyMessage;
-  final List<TimelineMessage> allMessages;
-  final String channelId;
-  final String? currentPubkey;
-  final bool isMember;
-  final bool isArchived;
-
-  const _NestedThreadSummaryRow({
-    required this.summary,
-    required this.replyMessage,
-    required this.allMessages,
-    required this.channelId,
-    required this.currentPubkey,
-    required this.isMember,
-    required this.isArchived,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final userCache = ref.watch(userCacheProvider);
-
-    return GestureDetector(
-      onTap: () {
-        Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => ThreadDetailPage(
-              threadHead: replyMessage,
-              allMessages: allMessages,
-              channelId: channelId,
-              currentPubkey: currentPubkey,
-              isMember: isMember,
-              isArchived: isArchived,
-            ),
-          ),
-        );
-      },
-      child: Padding(
-        key: ValueKey('nested-thread-summary-${replyMessage.id}'),
-        padding: const EdgeInsets.only(
-          left: messageAvatarSize + messageAvatarContentGap,
-          top: Grid.half,
-          bottom: Grid.xs,
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Stacked participant avatars.
-            SizedBox(
-              width:
-                  32.0 +
-                  (summary.participantPubkeys.length - 1).clamp(0, 2) * 20.0,
-              height: 32,
-              child: Stack(
-                children: [
-                  for (var i = 0; i < summary.participantPubkeys.length; i++)
-                    Positioned(
-                      left: i * 20.0,
-                      child: SmallAvatar(
-                        pubkey: summary.participantPubkeys[i],
-                        userCache: userCache,
-                        size: 32,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(width: Grid.xxs),
-            Flexible(
-              child: Text.rich(
-                TextSpan(
-                  children: [
-                    TextSpan(
-                      text:
-                          '${summary.replyCount} ${summary.replyCount == 1 ? 'reply' : 'replies'}',
-                      style: replyPreviewTextStyle.copyWith(
-                        color: context.colors.primary,
-                      ),
-                    ),
-                    if (summary.lastReplyAt case final lastReplyAt?) ...[
-                      TextSpan(
-                        text: ' · ',
-                        style: replyPreviewTextStyle.copyWith(
-                          color: context.colors.onSurfaceVariant.withValues(
-                            alpha: 0.5,
-                          ),
-                        ),
-                      ),
-                      TextSpan(
-                        text:
-                            'last reply ${formatThreadSummaryLastReplyTime(lastReplyAt)}',
-                        style: replyPreviewTextStyle.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ThreadTailMetricsObserver with WidgetsBindingObserver {
-  final VoidCallback onMetricsChanged;
-
-  _ThreadTailMetricsObserver({required this.onMetricsChanged});
-
-  @override
-  void didChangeMetrics() => onMetricsChanged();
 }
 
 class _ThreadMessage extends ConsumerWidget {
