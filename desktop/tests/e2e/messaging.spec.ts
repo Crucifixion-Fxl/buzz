@@ -314,9 +314,9 @@ test.beforeEach(async ({ page }, testInfo) => {
                                   )
                                     ? 10_000
                                     : testInfo.title.includes(
-                                          "send does not wait",
+                                          "explicit cancellation keeps pending",
                                         )
-                                      ? 3_000
+                                      ? 10_000
                                       : testInfo.title.includes(
                                             "draft auto-send",
                                           )
@@ -846,7 +846,7 @@ test("unresolvable preview disappears after the terminal miss", async ({
   await expect(row.locator("[data-link-preview]")).toHaveCount(0);
 });
 
-test("send does not wait for a pending link preview snapshot", async ({
+test("explicit cancellation keeps pending link preview from silently sending bare", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?send=pending";
@@ -855,29 +855,57 @@ test("send does not wait for a pending link preview snapshot", async ({
   await page.getByTestId("message-input").fill(previewUrl);
 
   const composerPreviews = page.locator("[data-composer-link-previews]");
+  const card = composerPreviews.locator(
+    '[data-link-preview="github-pull-request"]',
+  );
+  const send = page.getByTestId("send-message");
+  const cancel = card.getByTestId("composer-hide-link-previews");
+  const progress = card.getByTestId("link-preview-progress");
+  const textPlaceholder = card.getByTestId("link-preview-text-placeholder");
   await expect(composerPreviews).toHaveAttribute(
     "data-ready-snapshot-count",
     "0",
   );
-  await expect(
-    composerPreviews.locator('[data-link-preview="github-pull-request"]'),
-  ).toHaveAttribute("data-image-state", "pending");
+  await expect(card).toHaveAttribute("data-image-state", "pending");
+  await expect(cancel).toHaveAttribute(
+    "aria-label",
+    "Send without link previews",
+  );
+  await expect(cancel).toHaveAttribute("title", "Send without link previews");
+  await expect(progress).toBeVisible();
+  await expect(progress).not.toHaveAttribute("aria-valuenow");
+  await expect(textPlaceholder).toBeVisible();
+  await expect(card.locator("[data-link-preview-hostname]")).toHaveCount(0);
+  await expect(card.getByText("github.com", { exact: true })).toHaveCount(0);
+  await expect(cancel).toHaveCSS("opacity", "0");
+  await card.hover();
+  await expect(cancel).toHaveCSS("opacity", "1");
+  await expect(card).toHaveCSS("overflow", "visible");
+  await expect(card.locator('[data-slot="attachment"]')).toHaveCSS(
+    "overflow",
+    "hidden",
+  );
 
-  // While metadata is still resolving Send is disabled so the button does not
-  // flicker ready -> not-ready. But a link whose metadata stalls must not trap
-  // the composer: past the disable cap Send re-enables even though the card is
-  // still pending, and sending ships a bare link with no snapshot tag.
-  await expect(page.getByTestId("send-message")).toBeDisabled();
+  // The mock metadata takes ten seconds, well beyond the former two-second
+  // escape. Send must remain locked while the visible card is pending; network
+  // may not silently convert this event to a bare link.
+  await expect(send).toBeDisabled();
+  await page.waitForTimeout(2_200);
   await expect(composerPreviews).toHaveAttribute(
     "data-has-pending-snapshots",
-    "false",
+    "true",
   );
-  await expect(
-    composerPreviews.locator('[data-link-preview="github-pull-request"]'),
-  ).toHaveAttribute("data-image-state", "pending");
-  await expect(page.getByTestId("send-message")).toBeEnabled();
+  await expect(card).toHaveAttribute("data-image-state", "pending");
+  await expect(send).toBeDisabled();
 
-  await page.getByTestId("send-message").click();
+  // The explicit escape suppresses all previews, preserves the draft link, and
+  // makes the durable no-preview intent sendable immediately.
+  await cancel.click();
+  await expect(composerPreviews).toHaveCount(0);
+  await expect(page.getByTestId("message-input")).toContainText(previewUrl);
+  await expect(send).toBeEnabled();
+  await send.click();
+
   const row = page.getByTestId("message-row").last();
   await expect(row).toContainText(previewUrl);
   await expect(row.locator("[data-link-preview]")).toHaveCount(0);
@@ -890,7 +918,7 @@ test("send does not wait for a pending link preview snapshot", async ({
       call?.payload as { linkPreviewTags?: string[][] | null } | undefined
     )?.linkPreviewTags;
   });
-  expect(linkPreviewTags ?? []).toEqual([]);
+  expect(linkPreviewTags).toEqual([["link-preview", "none"]]);
 });
 
 test("Enter during an in-flight snapshot upload cannot ship a bare link", async ({
@@ -909,6 +937,11 @@ test("Enter during an in-flight snapshot upload cannot ship a bare link", async 
   // the snapshot media upload is still in flight (linkPreviewUploadDelayMs), so
   // the composer reports the preview as still pending.
   await expect(card).toHaveAttribute("data-image-state", "image");
+  await expect(card.locator("[data-link-preview-thumbnail] img")).toHaveCSS(
+    "opacity",
+    "0.5",
+  );
+  await expect(card.getByTestId("link-preview-text-placeholder")).toBeVisible();
   await expect(card).toHaveAttribute("data-snapshot-tag-ready", "false");
   await expect(composerPreviews).toHaveAttribute(
     "data-has-pending-snapshots",
@@ -934,6 +967,13 @@ test("Enter during an in-flight snapshot upload cannot ship a bare link", async 
   // Once the upload settles the tag is captured and Send re-enables. Sending
   // now lands the preview snapshot matching the body.
   await expect(card).toHaveAttribute("data-snapshot-tag-ready", "true");
+  await expect(card.locator("[data-link-preview-thumbnail] img")).toHaveCSS(
+    "opacity",
+    "1",
+  );
+  await expect(card.getByTestId("link-preview-text-placeholder")).toHaveCount(
+    0,
+  );
   await expect(page.getByTestId("send-message")).toBeEnabled();
   await input.press("Enter");
   const row = page.getByTestId("message-row").last();
