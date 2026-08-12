@@ -23,11 +23,16 @@ test("estimateRowHeight: short text is near the floor", () => {
   assert.ok(h >= 60 && h < 120, `expected small, got ${h}`);
 });
 
-test("estimateRowHeight: continuation reserves its uniform padding", () => {
-  const h = estimateRowHeight(msg({ body: "hello" }), {
+test("estimateRowHeight: continuation uses the classic floor by default", () => {
+  const classic = estimateRowHeight(msg({ body: "hello" }), {
     isContinuation: true,
   });
-  assert.equal(h, 28);
+  const bubbles = estimateRowHeight(msg({ body: "hello" }), {
+    isContinuation: true,
+    messageStyle: "bubbles",
+  });
+  assert.equal(classic, 28);
+  assert.equal(bubbles, 48);
 });
 
 test("estimateRowHeight: many lines reserve more", () => {

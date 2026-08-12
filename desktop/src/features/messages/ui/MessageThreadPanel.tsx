@@ -11,10 +11,7 @@ import {
   hasNestedThreadBranches,
   type MainTimelineEntry,
 } from "@/features/messages/lib/threadPanel";
-import {
-  hasSameMessageAuthor,
-  isWithinGroupingWindow,
-} from "@/features/messages/lib/messageGrouping";
+import { continuesMessageGroup } from "@/features/messages/lib/messageGrouping";
 import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -26,6 +23,7 @@ import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { VideoReviewNavigationProvider } from "@/shared/ui/VideoReviewNavigation";
 import { cn } from "@/shared/lib/cn";
+import { useMessageStyle } from "@/shared/lib/messageStylePreference";
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
@@ -44,7 +42,7 @@ import { ComposerActivityAccessory } from "./ComposerActivityAccessory";
 import { ComposerDockBackdrop } from "./ComposerDockBackdrop";
 import { MessageComposer } from "./MessageComposer";
 import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
-import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
+import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
@@ -241,6 +239,7 @@ export function MessageThreadPanel({
   autoSendDraftKey = null,
   onAutoSubmitComplete,
 }: MessageThreadPanelProps) {
+  const showMessageBubbles = useMessageStyle() === "bubbles";
   const threadBodyRef = React.useRef<HTMLDivElement>(null);
   const threadContentRef = React.useRef<HTMLDivElement>(null);
   const threadComposerWrapperRef = React.useRef<HTMLDivElement>(null);
@@ -447,20 +446,19 @@ export function MessageThreadPanel({
       const collapseDepthGuideAncestors = ancestors.filter((ancestor) =>
         continuationDepths.includes(ancestor.message.depth),
       );
-      const collapseDepthGuideActions: ThreadDepthGuideAction[] | undefined =
-        collapseDepthGuideAncestors.length > 0
-          ? collapseDepthGuideAncestors.map((ancestor) => ({
-              active:
-                hoveredCollapseBranchId === ancestor.message.id &&
-                entry.message.depth === ancestor.message.depth + 1,
-              depth: ancestor.message.depth,
-              label:
-                ancestor.message.id === threadHead.id
-                  ? "Collapse thread"
-                  : "Collapse replies",
-              message: ancestor.message,
-            }))
-          : undefined;
+      const collapseDepthGuideActions = collapseDepthGuideAncestors.length
+        ? collapseDepthGuideAncestors.map((ancestor) => ({
+            active:
+              hoveredCollapseBranchId === ancestor.message.id &&
+              entry.message.depth === ancestor.message.depth + 1,
+            depth: ancestor.message.depth,
+            label:
+              ancestor.message.id === threadHead.id
+                ? "Collapse thread"
+                : "Collapse replies",
+            message: ancestor.message,
+          }))
+        : undefined;
       const nextEntry = deferredThreadReplies[index + 1];
       const connectsToVisibleChild =
         nextEntry != null && nextEntry.message.depth > entry.message.depth;
@@ -470,18 +468,19 @@ export function MessageThreadPanel({
         !isHuddleTranscript &&
         !startsUnreadSection &&
         entry.summary === null &&
-        hasSameMessageAuthor(previousGroupMessage, entry.message) &&
-        isWithinGroupingWindow(
-          previousGroupMessage?.createdAt,
-          entry.message.createdAt,
-        );
+        continuesMessageGroup(previousGroupMessage, entry.message);
+      const isFollowedByContinuation =
+        !isHuddleTranscript &&
+        entry.summary === null &&
+        nextEntry?.summary === null &&
+        nextEntry.message.id !== firstUnreadReplyId &&
+        continuesMessageGroup(entry.message, nextEntry.message);
 
       if (connectsToVisibleChild && !entry.summary) {
         ancestorStack.push({ index, message: entry.message });
       }
 
       previousGroupMessage = entry.summary !== null ? null : entry.message;
-
       return {
         collapseDepthGuideActions,
         connectsToVisibleChild,
@@ -489,6 +488,7 @@ export function MessageThreadPanel({
         entry,
         index,
         isContinuation,
+        isFollowedByContinuation,
       };
     });
   }, [
@@ -617,6 +617,7 @@ export function MessageThreadPanel({
                 }
                 onMarkUnread={onMarkUnread}
                 onMarkRead={onMarkRead}
+                onReply={onSelectReplyTarget}
                 onToggleReaction={onToggleReaction}
                 onUnfollowThread={
                   onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
@@ -685,6 +686,7 @@ export function MessageThreadPanel({
                     entry,
                     index,
                     isContinuation,
+                    isFollowedByContinuation,
                   } = item;
                   const showUnreadDivider =
                     index > 0 && entry.message.id === firstUnreadReplyId;
@@ -711,7 +713,9 @@ export function MessageThreadPanel({
                       className={cn(
                         "flex flex-col gap-0",
                         entry.summary &&
-                          "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+                          (showMessageBubbles
+                            ? "group/message px-0 py-0.5"
+                            : "group/message rounded-2xl px-0 py-0.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50"),
                       )}
                       key={entry.message.renderKey ?? entry.message.id}
                     >
@@ -743,6 +747,7 @@ export function MessageThreadPanel({
                         huddleMemberPubkeys={huddleMemberPubkeys}
                         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
                         isContinuation={isContinuation}
+                        isFollowedByContinuation={isFollowedByContinuation}
                         isUnread={isMessageUnreadById?.(entry.message.id)}
                         layoutVariant="thread-reply"
                         message={entry.message}

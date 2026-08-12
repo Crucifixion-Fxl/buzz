@@ -5,6 +5,9 @@ type MessageAuthorCandidate = {
 };
 
 type MessageGroupingCandidate = {
+  createdAt?: number | null;
+  pending?: boolean;
+  pubkey?: string | null;
   tags?: readonly (readonly string[])[] | null;
 };
 
@@ -58,4 +61,16 @@ export function isWithinGroupingWindow(
 
   const gap = currentCreatedAt - previousCreatedAt;
   return gap >= 0 && gap <= MESSAGE_GROUPING_WINDOW_SECONDS;
+}
+
+export function continuesMessageGroup(
+  previous: MessageGroupingCandidate | null | undefined,
+  current: MessageGroupingCandidate | null | undefined,
+) {
+  return (
+    current != null &&
+    !current.pending &&
+    hasSameMessageAuthor(previous, current) &&
+    isWithinGroupingWindow(previous?.createdAt, current.createdAt)
+  );
 }

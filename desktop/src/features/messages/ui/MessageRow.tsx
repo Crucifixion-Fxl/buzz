@@ -16,7 +16,6 @@ import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import {
@@ -34,6 +33,7 @@ import {
 } from "@/shared/constants/kinds";
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { cn } from "@/shared/lib/cn";
+import { useMessageStyle } from "@/shared/lib/messageStylePreference";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
@@ -43,33 +43,39 @@ import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
 import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
-import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { useOpenVideoReviewAt } from "@/shared/ui/VideoReviewNavigation";
 import { parseVideoReviewTimecode } from "@/shared/ui/videoReviewTimecode";
 import { VideoReviewTimecodeButton } from "@/shared/ui/VideoReviewTimecodeButton";
-import { MessageActionBar } from "./MessageActionBar";
 import { editMessage } from "@/shared/api/tauri";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
 import { toast } from "sonner";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
+import { MessageRowActions } from "./MessageRowActions";
+import type {
+  MessageRowProps,
+  ThreadDepthGuideAction,
+} from "./MessageRow.types";
+import {
+  getMessageBubbleBottomPaddingClass,
+  getMessageBubbleLayout,
+  MESSAGE_BUBBLE_CONTENT_PADDING_CLASSES,
+} from "./messageBubbleLayout";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
-
-export type ThreadDepthGuideAction = {
-  active?: boolean;
-  depth: number;
-  label: string;
-  message: TimelineMessage;
-};
+const MESSAGE_BODY_SURFACE_CLASSES = cn(
+  "w-fit max-w-full bg-muted/50",
+  MESSAGE_BUBBLE_CONTENT_PADDING_CLASSES,
+);
 
 export const MessageRow = React.memo(
   function MessageRow({
+    bodyFooter,
     channelId = null,
     currentPubkey,
     collapseDepthGuideActions,
@@ -87,6 +93,7 @@ export const MessageRow = React.memo(
     collapseDescendantsLabel,
     isFollowingThread,
     isContinuation = false,
+    isFollowedByContinuation = false,
     isUnread,
     layoutVariant = "default",
     message,
@@ -110,61 +117,11 @@ export const MessageRow = React.memo(
     showDepthGuides = true,
     videoReviewCommentRootId,
     videoReviewContext,
-  }: {
-    channelId?: string | null;
-    currentPubkey?: string;
-    collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
-    connectDescendants?: boolean;
-    depthGuideDepths?: ReadonlyArray<number>;
-    highlighted?: boolean;
-    highlightDescendantRail?: boolean;
-    highlightReplyConnector?: boolean;
-    highlightThreadLineDepths?: ReadonlyArray<number>;
-    hoverBackground?: boolean;
-    huddleMemberPubkeys?: readonly string[];
-    huddleMemberPubkeysPending?: boolean;
-    hideAgentAccessBadge?: boolean;
-    actionBarPlacement?: "floating" | "inside";
-    collapseDescendantsLabel?: string;
-    isFollowingThread?: boolean;
-    isContinuation?: boolean;
-    isUnread?: boolean;
-    layoutVariant?: "default" | "thread-reply";
-    message: TimelineMessage;
-    onCollapseDepthGuide?: (message: TimelineMessage) => void;
-    onCollapseDepthGuideHoverChange?: (
-      message: TimelineMessage,
-      hovered: boolean,
-    ) => void;
-    onCollapseDescendants?: (message: TimelineMessage) => void;
-    onCollapseDescendantsHoverChange?: (
-      message: TimelineMessage,
-      hovered: boolean,
-    ) => void;
-    onDelete?: (message: TimelineMessage) => void;
-    onEdit?: (message: TimelineMessage) => void;
-    onFollowThread?: (message: TimelineMessage) => void;
-    onMarkUnread?: (message: TimelineMessage) => void;
-    onMarkRead?: (message: TimelineMessage) => void;
-    onToggleReaction?: (
-      message: TimelineMessage,
-      emoji: string,
-      remove: boolean,
-    ) => Promise<void>;
-    onReply?: (message: TimelineMessage) => void;
-    onSendToChannel?: (message: TimelineMessage) => Promise<void>;
-    onUnfollowThread?: (message: TimelineMessage) => void;
-    onEntranceComplete?: (messageId: string) => void;
-    playEntrance?: boolean;
-    profiles?: UserProfileLookup;
-    searchQuery?: string;
-    showDepthGuides?: boolean;
-    videoReviewCommentRootId?: string;
-    videoReviewContext?: VideoReviewContext;
-  }) {
+  }: MessageRowProps) {
     // Keep the transient send state with its timestamp rather than collapsing
     // it into a grouped message row with no header.
     const isDisplayedAsContinuation = isContinuation && !message.pending;
+    const showMessageBubbles = useMessageStyle() === "bubbles";
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
       null,
     );
@@ -294,6 +251,14 @@ export const MessageRow = React.memo(
       message.body,
       message.tags,
     );
+    const waveMessage = React.useMemo(
+      () => parseWaveMessageContent(message.body),
+      [message.body],
+    );
+    const hasStandaloneCardSurface =
+      message.kind === KIND_HUDDLE_STARTED ||
+      message.kind === KIND_STREAM_MESSAGE_DIFF ||
+      waveMessage !== null;
     const bodyOffsetClass = emojiOnly ? "mt-1" : "mt-conversation-body";
 
     const { nonDmChannelNames: channelNames } = useChannelNavigation();
@@ -395,7 +360,6 @@ export const MessageRow = React.memo(
             />
           );
         default: {
-          const waveMessage = parseWaveMessageContent(message.body);
           if (waveMessage) {
             return (
               <WaveMessageAttachment
@@ -416,6 +380,7 @@ export const MessageRow = React.memo(
               channelNames={channelNames}
               className={cn(
                 "max-w-full text-message",
+                showMessageBubbles && "message-bubble-markdown",
                 emojiOnly &&
                   "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}
@@ -513,9 +478,9 @@ export const MessageRow = React.memo(
 
     const continuationTimestampGutter = (
       <div
-        aria-hidden="true"
+        aria-hidden
         className={cn(
-          "flex w-9 shrink-0 justify-end items-start pt-0.5",
+          "relative flex w-9 shrink-0 justify-end items-start pt-0.5",
           isThreadReplyLayout ? "self-start" : "self-stretch",
         )}
       >
@@ -562,45 +527,39 @@ export const MessageRow = React.memo(
       />
     ) : null;
 
+    const anchorActionBarToBubble =
+      showMessageBubbles && !hasStandaloneCardSurface;
+
     const actionBarNode = (
-      <div
-        className={cn(
-          "absolute right-2 top-1 z-10 sm:pointer-events-none",
-          actionBarPlacement === "floating"
-            ? isContinuation
-              ? "sm:-top-3 sm:-translate-y-1/2"
-              : "sm:top-0 sm:-translate-y-1/2"
-            : "sm:top-1 sm:translate-y-0",
-        )}
-      >
-        <MessageActionBar
-          channelId={channelId}
-          isFollowingThread={isFollowingThread}
-          isUnread={isUnread}
-          message={message}
-          onDelete={onDelete}
-          onEdit={onEdit}
-          onFollowThread={onFollowThread}
-          onMarkUnread={onMarkUnread}
-          onMarkRead={onMarkRead}
-          onReactionBadgeBurstRequest={
-            reactionPending ? undefined : setBadgeBurstEmoji
-          }
-          onReactionSelect={
-            canToggleReactions ? handleReactionSelect : undefined
-          }
-          onRemindLater={handleRemindLater}
-          onReply={onReply}
-          onSendToChannel={
-            onSendToChannel && sendToChannelAllowed
-              ? handleSendToChannel
-              : undefined
-          }
-          onUnfollowThread={onUnfollowThread}
-          reactionErrorMessage={reactionErrorMessage}
-          reactions={reactions}
-        />
-      </div>
+      <MessageRowActions
+        actionBarPlacement={actionBarPlacement}
+        anchorToBubble={anchorActionBarToBubble}
+        channelId={channelId}
+        isContinuation={isContinuation}
+        isFollowingThread={isFollowingThread}
+        isUnread={isUnread}
+        message={message}
+        onDelete={onDelete}
+        onEdit={onEdit}
+        onFollowThread={onFollowThread}
+        onMarkRead={onMarkRead}
+        onMarkUnread={onMarkUnread}
+        onReactionBadgeBurstRequest={
+          reactionPending ? undefined : setBadgeBurstEmoji
+        }
+        onReactionSelect={canToggleReactions ? handleReactionSelect : undefined}
+        onRemindLater={handleRemindLater}
+        onReply={onReply}
+        onSendToChannel={
+          onSendToChannel && sendToChannelAllowed
+            ? handleSendToChannel
+            : undefined
+        }
+        onUnfollowThread={onUnfollowThread}
+        reactionErrorMessage={reactionErrorMessage}
+        reactions={reactions}
+        showMessageBubbles={showMessageBubbles}
+      />
     );
 
     const statusMetadataNode =
@@ -670,50 +629,96 @@ export const MessageRow = React.memo(
     const bodyContainerClass = isDisplayedAsContinuation
       ? "mt-0"
       : bodyOffsetClass;
+    const { radiusClass, rowSpacingClass: bubbleRowSpacingClass } =
+      getMessageBubbleLayout(
+        isDisplayedAsContinuation,
+        isFollowedByContinuation,
+      );
 
-    const messageBodyNode = (
+    const coreMessageBodyNode = (
       <>
         <SentFromThreadLine channelId={channelId} tags={message.tags} />
         {renderBody()}
         {continuationMetadataNode}
-        <MessageReactions
-          messageId={message.id}
-          reactions={reactions}
-          canToggle={canToggleReactions}
-          pending={reactionPending}
-          burstEmojiOnRender={badgeBurstEmoji}
-          onBurstEmojiRendered={(emoji) => {
-            setBadgeBurstEmoji((current) =>
-              current === emoji ? null : current,
-            );
-          }}
-          onSelect={(emoji) => {
-            void handleReactionSelect(emoji);
-          }}
-        />
-        {reactionErrorMessage ? (
-          <p className="mt-1.5 text-xs text-destructive">
-            {reactionErrorMessage}
-          </p>
-        ) : null}
-        {expandedDiffId === message.id ? (
-          <React.Suspense
-            fallback={
-              <div className="p-3 text-sm text-muted-foreground">
-                Loading diff viewer…
-              </div>
-            }
-          >
-            <DiffMessageExpanded
-              content={message.body}
-              filePath={getTag("file")}
-              onClose={() => {
-                setExpandedDiffId(null);
-              }}
-            />
-          </React.Suspense>
-        ) : null}
       </>
+    );
+    const expandedDiffNode =
+      expandedDiffId === message.id ? (
+        <React.Suspense
+          fallback={
+            <div className="p-3 text-sm text-muted-foreground">
+              Loading diff viewer…
+            </div>
+          }
+        >
+          <DiffMessageExpanded
+            content={message.body}
+            filePath={getTag("file")}
+            onClose={() => {
+              setExpandedDiffId(null);
+            }}
+          />
+        </React.Suspense>
+      ) : null;
+    const reactionsNode = (
+      <MessageReactions
+        messageId={message.id}
+        reactions={reactions}
+        canToggle={canToggleReactions}
+        pending={reactionPending}
+        placement={
+          showMessageBubbles && !hasStandaloneCardSurface
+            ? "bubble-overlap"
+            : "inline"
+        }
+        burstEmojiOnRender={badgeBurstEmoji}
+        onBurstEmojiRendered={(emoji) => {
+          setBadgeBurstEmoji((current) => (current === emoji ? null : current));
+        }}
+        onSelect={(emoji) => {
+          void handleReactionSelect(emoji);
+        }}
+      />
+    );
+    const reactionErrorNode = reactionErrorMessage ? (
+      <p className="mt-1.5 text-xs text-destructive">{reactionErrorMessage}</p>
+    ) : null;
+
+    const classicMessageBodyNode = (
+      <div className={bodyContainerClass}>
+        {coreMessageBodyNode}
+        {reactionsNode}
+        {reactionErrorNode}
+        {expandedDiffNode}
+      </div>
+    );
+    const bubbleMessageBodyNode = (
+      <div className={cn(bodyContainerClass, "w-fit max-w-full")}>
+        {hasStandaloneCardSurface ? (
+          <div data-testid="message-standalone-card-content">
+            {coreMessageBodyNode}
+            {expandedDiffNode}
+            {bodyFooter}
+          </div>
+        ) : (
+          <div
+            className={cn(
+              MESSAGE_BODY_SURFACE_CLASSES,
+              "relative",
+              radiusClass,
+              getMessageBubbleBottomPaddingClass(reactions.length > 0),
+            )}
+            data-testid="message-body-surface"
+          >
+            {anchorActionBarToBubble ? actionBarNode : null}
+            {coreMessageBodyNode}
+            {expandedDiffNode}
+            {bodyFooter}
+          </div>
+        )}
+        {reactionsNode}
+        {reactionErrorNode}
+      </div>
     );
 
     return (
@@ -881,12 +886,16 @@ export const MessageRow = React.memo(
           className={cn(
             "group/message relative z-10 rounded-2xl transition-colors",
             playEntrance && "motion-enter-conversation",
-            "py-conversation-row",
-            hoverBackground
-              ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
-              : isThreadReplyLayout
+            showMessageBubbles ? bubbleRowSpacingClass : "py-conversation-row",
+            showMessageBubbles
+              ? hoverBackground || isThreadReplyLayout
                 ? "mx-1 px-2"
-                : "px-2",
+                : "px-2"
+              : hoverBackground
+                ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
+                : isThreadReplyLayout
+                  ? "mx-1 px-2"
+                  : "px-2",
             "flex gap-2.5",
             isDisplayedAsContinuation ? "items-center" : "items-start",
             hasActiveReminder ? "bg-blue-500/10" : "",
@@ -898,24 +907,17 @@ export const MessageRow = React.memo(
           data-testid="message-row"
           onAnimationEnd={handleEntranceAnimationEnd}
         >
-          {isThreadReplyLayout ? (
-            <>
-              {avatarGutterNode}
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                {headerNode}
-                <div className={bodyContainerClass}>{messageBodyNode}</div>
-              </div>
-            </>
-          ) : (
-            <>
-              {avatarGutterNode}
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                {headerNode}
-                <div className={bodyContainerClass}>{messageBodyNode}</div>
-              </div>
-            </>
-          )}
-          {actionBarNode}
+          {avatarGutterNode}
+          <div
+            className="flex min-w-0 flex-1 flex-col gap-0.5"
+            data-testid="message-content-column"
+          >
+            {headerNode}
+            {showMessageBubbles
+              ? bubbleMessageBodyNode
+              : classicMessageBodyNode}
+          </div>
+          {anchorActionBarToBubble ? null : actionBarNode}
         </article>
       </div>
     );
@@ -945,6 +947,7 @@ export const MessageRow = React.memo(
     tagsEqual(prev.message.tags, next.message.tags) &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
+    prev.bodyFooter === next.bodyFooter &&
     prev.currentPubkey === next.currentPubkey &&
     depthGuideActionsEqual(
       prev.collapseDepthGuideActions,
@@ -965,6 +968,7 @@ export const MessageRow = React.memo(
     prev.huddleMemberPubkeysPending === next.huddleMemberPubkeysPending &&
     prev.hideAgentAccessBadge === next.hideAgentAccessBadge &&
     prev.isContinuation === next.isContinuation &&
+    prev.isFollowedByContinuation === next.isFollowedByContinuation &&
     prev.isFollowingThread === next.isFollowingThread &&
     prev.isUnread === next.isUnread &&
     prev.layoutVariant === next.layoutVariant &&

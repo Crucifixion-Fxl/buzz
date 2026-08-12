@@ -183,6 +183,29 @@
   color: hsl(var(--primary) / 0.9);
 }
 
+/* Message bubbles already provide the containing shape. Keep mentions as
+   emphasized inline text instead of nesting another pill inside the bubble. */
+.message-markdown.message-bubble-markdown .mention-chip {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: hsl(var(--primary));
+  font-weight: 600;
+  line-height: inherit;
+}
+
+.message-markdown.message-bubble-markdown .mention-chip-hover:hover {
+  background: transparent;
+  color: hsl(var(--primary) / 0.9);
+}
+
+.message-markdown.message-bubble-markdown .mention-chip-prefix {
+  display: inline;
+  transform: none;
+}
+
 .message-markdown .agent-mention-at-hidden {
   display: inline-block;
   width: 0;
@@ -221,6 +244,14 @@
   mask:
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 8V4H8'/%3E%3Crect width='16' height='12' x='4' y='8' rx='2'/%3E%3Cpath d='M2 14h2'/%3E%3Cpath d='M20 14h2'/%3E%3Cpath d='M15 13v2'/%3E%3Cpath d='M9 13v2'/%3E%3C/svg%3E")
     center / contain no-repeat;
+}
+
+.message-markdown.message-bubble-markdown .agent-mention-highlight {
+  padding-left: calc(var(--agent-icon-size) + var(--agent-icon-gap));
+}
+
+.message-markdown.message-bubble-markdown .agent-mention-highlight::before {
+  left: 0;
 }
 
 @keyframes route-target-highlight-fade {

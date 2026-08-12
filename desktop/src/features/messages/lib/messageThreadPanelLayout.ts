@@ -3,8 +3,11 @@
  * loading skeleton stay pixel-aligned as content swaps in.
  */
 
-/** Inline gutter around thread message rows. */
-export const THREAD_PANEL_MESSAGE_GUTTER_CLASS = "px-4";
+/**
+ * Combines with each message row's margin and padding so its content frame
+ * shares both edges with the thread composer's 1.25rem gutter.
+ */
+export const THREAD_PANEL_MESSAGE_GUTTER_CLASS = "px-2";
 
 /** Inline gutter around the thread composer and its activity row. */
 export const THREAD_PANEL_COMPOSER_GUTTER_CLASS = "px-5";

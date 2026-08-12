@@ -22,8 +22,10 @@ const REACTION_NATIVE_GLYPH_CLASSES = "h-3 w-3 text-xs";
 const REACTION_COUNT_CLASSES = "text-muted-foreground";
 const REACTION_NATIVE_COUNT_CLASSES =
   "text-muted-foreground translate-y-[0.5px]";
-const REACTION_PILL_HOVER_CLASSES =
+const INLINE_REACTION_PILL_HOVER_CLASSES =
   "hover:bg-primary/10 hover:text-foreground focus-visible:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring";
+const BUBBLE_REACTION_PILL_HOVER_CLASSES =
+  "hover:bg-muted hover:text-foreground focus-visible:bg-muted focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring";
 const BADGE_BURST_STABLE_FRAMES = 2;
 const BADGE_BURST_MAX_FRAMES = 12;
 const BADGE_BURST_RECT_EPSILON = 0.5;
@@ -143,6 +145,7 @@ export function MessageReactions({
   pending,
   onSelect,
   className,
+  placement = "inline",
   burstEmojiOnRender = null,
   onBurstEmojiRendered,
 }: {
@@ -152,9 +155,11 @@ export function MessageReactions({
   pending: boolean;
   onSelect: (emoji: string) => void;
   className?: string;
+  placement?: "inline" | "bubble-overlap";
   burstEmojiOnRender?: string | null;
   onBurstEmojiRendered?: (emoji: string) => void;
 }) {
+  const overlapsBubble = placement === "bubble-overlap";
   const { burstEmoji } = useEmojiBurst();
   const [pendingBadgeBurstEmoji, setPendingBadgeBurstEmoji] = React.useState<
     string | null
@@ -249,13 +254,15 @@ export function MessageReactions({
   return (
     <div
       className={cn(
-        "group/reactions mt-1.5 flex flex-wrap items-center gap-1.5",
+        "group/reactions flex flex-wrap items-center gap-1.5",
+        placement === "bubble-overlap" ? "relative z-10 -mt-3 px-3" : "mt-1.5",
         className,
       )}
       data-testid="message-reactions"
     >
       {reactions.map((reaction) => (
         <ReactionPill
+          bubbleSurface={overlapsBubble}
           key={`${messageId}-${reaction.emoji}`}
           canToggle={canToggle}
           pending={pending}
@@ -266,6 +273,7 @@ export function MessageReactions({
       ))}
       {canToggle ? (
         <InlineReactionPicker
+          bubbleSurface={overlapsBubble}
           messageId={messageId}
           onSelect={onSelect}
           pending={pending}
@@ -278,12 +286,14 @@ export function MessageReactions({
 }
 
 function InlineReactionPicker({
+  bubbleSurface,
   messageId,
   onSelect,
   pending,
   reactions,
   requestBadgeBurst,
 }: {
+  bubbleSurface: boolean;
   messageId: string;
   onSelect: (emoji: string) => void;
   pending: boolean;
@@ -313,7 +323,9 @@ function InlineReactionPicker({
                 open
                   ? "pointer-events-auto border-border/80 bg-background text-foreground opacity-100 shadow-xs"
                   : "border-border/70 bg-muted/70",
-                REACTION_PILL_HOVER_CLASSES,
+                bubbleSurface
+                  ? BUBBLE_REACTION_PILL_HOVER_CLASSES
+                  : INLINE_REACTION_PILL_HOVER_CLASSES,
               )}
               data-testid={`add-reaction-${messageId}`}
               disabled={pending}
@@ -348,12 +360,14 @@ function InlineReactionPicker({
 }
 
 function ReactionPill({
+  bubbleSurface,
   reaction,
   canToggle,
   pending,
   registerPill,
   onSelect,
 }: {
+  bubbleSurface: boolean;
   reaction: TimelineReaction;
   canToggle: boolean;
   pending: boolean;
@@ -407,13 +421,21 @@ function ReactionPill({
   const pillClasses = cn(
     REACTION_PILL_BASE_CLASSES,
     "min-w-12 justify-center gap-1.5 px-2",
-    reaction.reactedByCurrentUser
-      ? "border-primary/40 bg-primary/10 text-primary"
-      : "border-border/70 bg-muted/70 text-foreground/90",
+    bubbleSurface
+      ? reaction.reactedByCurrentUser
+        ? "border-primary bg-background text-primary"
+        : "border-border bg-background text-foreground"
+      : reaction.reactedByCurrentUser
+        ? "border-primary/40 bg-primary/10 text-primary"
+        : "border-border/70 bg-muted/70 text-foreground/90",
     canToggle
       ? reaction.reactedByCurrentUser
-        ? "hover:bg-primary/10 hover:text-primary focus-visible:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-        : REACTION_PILL_HOVER_CLASSES
+        ? bubbleSurface
+          ? "hover:bg-muted hover:text-primary focus-visible:bg-muted focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+          : "hover:bg-primary/10 hover:text-primary focus-visible:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+        : bubbleSurface
+          ? BUBBLE_REACTION_PILL_HOVER_CLASSES
+          : INLINE_REACTION_PILL_HOVER_CLASSES
       : "cursor-default",
   );
 

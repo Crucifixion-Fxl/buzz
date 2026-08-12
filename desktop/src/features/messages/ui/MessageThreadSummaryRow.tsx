@@ -5,7 +5,7 @@ import type {
   TimelineThreadSummaryParticipant,
 } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
-import type { ThreadDepthGuideAction } from "@/features/messages/ui/MessageRow";
+import type { ThreadDepthGuideAction } from "@/features/messages/ui/MessageRow.types";
 import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFormatters";
 import {
   getThreadReplyAvatarCenterRem,
@@ -64,6 +64,7 @@ export function MessageThreadSummaryRow({
   onCollapseDepthGuideHoverChange,
   onOpenThread,
   showDepthGuides = true,
+  surface = "default",
   summary,
   summaryIndentOffsetRem = 0,
   unreadCount,
@@ -80,20 +81,25 @@ export function MessageThreadSummaryRow({
   ) => void;
   onOpenThread: (message: TimelineMessage) => void;
   showDepthGuides?: boolean;
+  surface?: "default" | "message-body";
   summary: TimelineThreadSummary;
   summaryIndentOffsetRem?: number;
   unreadCount?: number;
 }) {
+  const isMessageBodySurface = surface === "message-body";
   const indentRem = getThreadReplyIndentRem(depth);
-  const hoverLeftRem =
-    indentRem + THREAD_REPLY_ROW_MARGIN_INLINE_REM + summaryIndentOffsetRem;
+  const hoverLeftRem = isMessageBodySurface
+    ? 0
+    : indentRem + THREAD_REPLY_ROW_MARGIN_INLINE_REM + summaryIndentOffsetRem;
   const hoverLeft = threadReplyLength(hoverLeftRem);
-  const contentPaddingStart = threadReplyLength(
-    THREAD_SUMMARY_CONTENT_OFFSET_REM,
-  );
-  const surfaceInsetStart = `calc(${contentPaddingStart} - ${threadReplyLength(
-    THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM,
-  )})`;
+  const contentPaddingStart = isMessageBodySurface
+    ? threadReplyLength(THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM)
+    : threadReplyLength(THREAD_SUMMARY_CONTENT_OFFSET_REM);
+  const surfaceInsetStart = isMessageBodySurface
+    ? "0"
+    : `calc(${contentPaddingStart} - ${threadReplyLength(
+        THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM,
+      )})`;
   const replyLabel = summary.replyCount === 1 ? "reply" : "replies";
   const summaryAriaLabel = summary.lastReplyAt
     ? `View thread with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
@@ -110,7 +116,12 @@ export function MessageThreadSummaryRow({
   );
 
   return (
-    <div className="relative pb-1 pt-0.5">
+    <div
+      className={cn(
+        "relative",
+        isMessageBodySurface ? "pt-1.5" : "pb-1 pt-0.5",
+      )}
+    >
       {showDepthGuides && depthGuideItems.length > 0 ? (
         <div
           aria-hidden={

@@ -27,6 +27,7 @@ import {
 import type { TimelineMessage } from "@/features/messages/types";
 import { formatTime } from "@/features/messages/lib/dateFormatters";
 import {
+  continuesMessageGroup,
   hasSameMessageAuthor,
   isWithinGroupingWindow,
   startsNewMessageGroup,
@@ -623,6 +624,7 @@ function InboxMessageDetailPane({
               const hasUnreadBoundary = message.id === unreadBoundaryEventId;
               const isAfterSeparator = index === 1 || hasUnreadBoundary;
               const previousMessage = displayMessages[index - 1];
+              const nextMessage = displayMessages[index + 1];
               const isContinuation =
                 !isAfterSeparator &&
                 !startsNewMessageGroup(message) &&
@@ -633,6 +635,24 @@ function InboxMessageDetailPane({
                 isWithinGroupingWindow(
                   previousMessage?.createdAt,
                   message.createdAt,
+                );
+              const nextHasUnreadBoundary =
+                nextMessage?.id === unreadBoundaryEventId;
+              const isNextAfterSeparator =
+                index + 1 === 1 || nextHasUnreadBoundary;
+              const isFollowedByContinuation =
+                nextMessage !== undefined &&
+                !isNextAfterSeparator &&
+                !startsNewMessageGroup(nextMessage) &&
+                continuesMessageGroup(
+                  {
+                    createdAt: message.createdAt,
+                    pubkey: message.authorPubkey,
+                  },
+                  {
+                    createdAt: nextMessage.createdAt,
+                    pubkey: nextMessage.authorPubkey,
+                  },
                 );
 
               const canManageMessage = canManageMessageForCurrentUser(
@@ -659,6 +679,7 @@ function InboxMessageDetailPane({
                   canReply={canReply}
                   channelId={item.item.channelId}
                   isContinuation={isContinuation}
+                  isFollowedByContinuation={isFollowedByContinuation}
                   isFirst={index === 0}
                   isFocusHighlightVisible={isFocusHighlightVisible}
                   key={message.id}

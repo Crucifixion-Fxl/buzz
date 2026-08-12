@@ -133,7 +133,7 @@ export function SettingsSegmentedControl<Value extends string>({
   return (
     <fieldset
       className={cn(
-        "relative isolate grid h-8 w-60 shrink-0 grid-cols-3 overflow-hidden rounded-md bg-muted/45 p-0.5",
+        "relative isolate grid h-8 w-60 shrink-0 overflow-hidden rounded-md bg-muted/45 p-0.5",
         onPreviewChange && "touch-none select-none cursor-ew-resize",
         className,
       )}
@@ -142,6 +142,9 @@ export function SettingsSegmentedControl<Value extends string>({
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
+      style={{
+        gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))`,
+      }}
     >
       <legend className="sr-only">{legend}</legend>
       <div

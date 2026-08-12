@@ -7,6 +7,7 @@ import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManag
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
+import { useMessageStyle } from "@/shared/lib/messageStylePreference";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
@@ -123,6 +124,7 @@ export function MessageRowItem({
   videoReviewContext,
 }: MessageRowItemProps) {
   const { message, summary } = entry;
+  const showMessageBubbles = useMessageStyle() === "bubbles";
   const canManage = canManageMessageForCurrentUser(
     message,
     currentPubkey,
@@ -130,18 +132,41 @@ export function MessageRowItem({
   );
   const canDelete = canManage && onDelete ? onDelete : undefined;
   const canEdit = canManage && onEdit ? onEdit : undefined;
+  const threadUnreadCount = threadUnreadCounts?.get(message.id);
+  const threadSummaryNode = React.useMemo(
+    () =>
+      summary && onOpenThread ? (
+        <MessageThreadSummaryRow
+          depth={message.depth}
+          message={message}
+          onOpenThread={onOpenThread}
+          showDepthGuides={false}
+          summary={summary}
+          surface={showMessageBubbles ? "message-body" : "default"}
+          summaryIndentOffsetRem={
+            showMessageBubbles ? 0 : -THREAD_REPLY_ROW_MARGIN_INLINE_REM
+          }
+          unreadCount={threadUnreadCount}
+        />
+      ) : null,
+    [message, onOpenThread, showMessageBubbles, summary, threadUnreadCount],
+  );
 
   if (summary && onOpenThread) {
     const isHighlighted = message.id === highlightedMessageId;
     return (
       <div
         className={cn(
-          "group/message relative mx-1 mb-1 flex flex-col gap-0 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+          "group/message relative mx-1 flex flex-col gap-0 px-0",
+          showMessageBubbles
+            ? null
+            : "mb-1 rounded-2xl py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
           isHighlighted &&
             "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
         )}
       >
         <MessageRow
+          bodyFooter={showMessageBubbles ? threadSummaryNode : undefined}
           channelId={channelId}
           highlighted={false}
           hoverBackground={false}
@@ -155,6 +180,7 @@ export function MessageRowItem({
           }
           isUnread={isUnread}
           isContinuation={isContinuation}
+          isFollowedByContinuation={isFollowedByContinuation}
           playEntrance={playEntrance}
           onEntranceComplete={onEntranceComplete}
           message={message}
@@ -176,15 +202,7 @@ export function MessageRowItem({
           showDepthGuides={false}
           videoReviewContext={videoReviewContext}
         />
-        <MessageThreadSummaryRow
-          depth={message.depth}
-          message={message}
-          onOpenThread={onOpenThread}
-          showDepthGuides={false}
-          summary={summary}
-          summaryIndentOffsetRem={-THREAD_REPLY_ROW_MARGIN_INLINE_REM}
-          unreadCount={threadUnreadCounts?.get(message.id)}
-        />
+        {showMessageBubbles ? null : threadSummaryNode}
         {footer}
       </div>
     );
@@ -207,6 +225,7 @@ export function MessageRowItem({
         huddleMemberPubkeysPending={huddleMemberPubkeysPending}
         hideAgentAccessBadge={hideAgentAccessBadges}
         isContinuation={isContinuation}
+        isFollowedByContinuation={isFollowedByContinuation}
         isUnread={isUnread}
         playEntrance={playEntrance}
         onEntranceComplete={onEntranceComplete}

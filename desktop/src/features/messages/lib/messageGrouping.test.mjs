@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   MESSAGE_GROUPING_WINDOW_SECONDS,
+  continuesMessageGroup,
   hasSameMessageAuthor,
   isWithinGroupingWindow,
   startsNewMessageGroup,
@@ -62,4 +63,26 @@ test("isWithinGroupingWindow: missing timestamps are out of window", () => {
   assert.equal(isWithinGroupingWindow(null, 1_000_000), false);
   assert.equal(isWithinGroupingWindow(1_000_000, undefined), false);
   assert.equal(isWithinGroupingWindow(undefined, undefined), false);
+});
+
+test("continuesMessageGroup: requires the same author inside the window", () => {
+  const previous = { createdAt: 100, pubkey: "abc" };
+  assert.equal(
+    continuesMessageGroup(previous, { createdAt: 101, pubkey: "abc" }),
+    true,
+  );
+  assert.equal(
+    continuesMessageGroup(previous, { createdAt: 101, pubkey: "def" }),
+    false,
+  );
+});
+
+test("continuesMessageGroup: pending messages always begin a new group", () => {
+  assert.equal(
+    continuesMessageGroup(
+      { createdAt: 100, pubkey: "abc" },
+      { createdAt: 101, pending: true, pubkey: "abc" },
+    ),
+    false,
+  );
 });

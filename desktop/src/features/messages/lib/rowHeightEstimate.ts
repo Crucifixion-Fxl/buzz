@@ -1,5 +1,9 @@
 import type * as React from "react";
 
+import {
+  getMessageStyle,
+  type MessageStyle,
+} from "@/shared/lib/messageStylePreference";
 import { dimensionsFromDim } from "@/shared/ui/markdown/utils";
 import type { TimelineItem } from "./timelineItems";
 import type { TimelineMessage } from "../types";
@@ -25,7 +29,8 @@ const MEDIA_MAX_HEIGHT = 256; // max-h-64
 const TEXT_LINE_HEIGHT = 20;
 const CODE_LINE_HEIGHT = 19;
 const CHARS_PER_LINE = 64; // rough wrap width at the timeline column
-const ROW_CHROME = 26; // author/time header + denser row padding
+const MESSAGE_BUBBLE_VERTICAL_PADDING = 20;
+const ROW_CHROME = 26; // author/time header + row padding
 const CONTINUATION_ROW_CHROME = 8; // uniform py-1 padding; header/avatar are hidden
 const MEDIA_BLOCK_MARGIN_TOP = 4; // image/video blocks use mt-1 in markdown
 const REACTION_ROW = 24;
@@ -110,13 +115,17 @@ function stripMediaOnlyLines(text: string): string {
 
 export function estimateRowHeight(
   message: TimelineMessage,
-  { isContinuation = false }: { isContinuation?: boolean } = {},
+  {
+    isContinuation = false,
+    messageStyle = getMessageStyle(),
+  }: { isContinuation?: boolean; messageStyle?: MessageStyle } = {},
 ): number {
   const body = message.body ?? "";
   const { prose, codeLines } = splitFencedCode(body);
   const proseForLineCount = stripMediaOnlyLines(prose);
 
   let height = isContinuation ? CONTINUATION_ROW_CHROME : ROW_CHROME;
+  if (messageStyle === "bubbles") height += MESSAGE_BUBBLE_VERTICAL_PADDING;
   height +=
     wrappedLineCount(proseForLineCount.trim() === "" ? "" : proseForLineCount) *
     TEXT_LINE_HEIGHT;
@@ -149,7 +158,10 @@ export function estimateRowHeight(
   if (message.reactions && message.reactions.length > 0) height += REACTION_ROW;
 
   return Math.max(
-    isContinuation ? CONTINUATION_MIN_ESTIMATE : MIN_ESTIMATE,
+    isContinuation
+      ? CONTINUATION_MIN_ESTIMATE +
+          (messageStyle === "bubbles" ? MESSAGE_BUBBLE_VERTICAL_PADDING : 0)
+      : MIN_ESTIMATE,
     Math.round(height),
   );
 }
@@ -165,13 +177,17 @@ const SYSTEM_GROUP_HEIGHT = 80;
  * near its true height instead of snapping the scroll position. `auto` keeps
  * refining once the row paints.
  */
-export function estimateTimelineItemHeight(item: TimelineItem): number {
+export function estimateTimelineItemHeight(
+  item: TimelineItem,
+  messageStyle: MessageStyle = getMessageStyle(),
+): number {
   return item.kind === "message"
     ? estimateRowHeight(item.entry.message, {
         isContinuation: item.isContinuation,
+        messageStyle,
       }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
     : item.kind === "system"
-      ? estimateRowHeight(item.entry.message)
+      ? estimateRowHeight(item.entry.message, { messageStyle })
       : item.kind === "system-group"
         ? SYSTEM_GROUP_HEIGHT
         : DIVIDER_HEIGHT;
@@ -179,6 +195,9 @@ export function estimateTimelineItemHeight(item: TimelineItem): number {
 
 export function timelineRowReserveStyle(
   item: TimelineItem,
+  messageStyle: MessageStyle = getMessageStyle(),
 ): React.CSSProperties {
-  return { containIntrinsicSize: `auto ${estimateTimelineItemHeight(item)}px` };
+  return {
+    containIntrinsicSize: `auto ${estimateTimelineItemHeight(item, messageStyle)}px`,
+  };
 }

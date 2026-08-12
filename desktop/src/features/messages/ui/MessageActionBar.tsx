@@ -53,25 +53,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 const ACTION_BUTTON_CLASS = "h-8 w-8 rounded-full p-0";
 const ACTION_ICON_CLASS = "!h-4 !w-4";
 
-function MoreActionsMenu({
-  channelId,
-  message,
-  onDelete,
-  onEdit,
-  onFollowThread,
-  onMarkUnread,
-  onMarkRead,
-  onOpenChange,
-  onRemindLater,
-  onSendToChannel,
-  onUnfollowThread,
-  open,
-  isFollowingThread,
-  isUnread,
-}: {
+type MoreActionsMenuProps = {
   /** Channel UUID for the "Copy link" action. When null/undefined, the
    *  Copy link entry is hidden (e.g. inbox preview rows that don't have it). */
   channelId?: string | null;
+  compact?: boolean;
   message: TimelineMessage;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
@@ -80,12 +66,36 @@ function MoreActionsMenu({
   onMarkRead?: (message: TimelineMessage) => void;
   onOpenChange: (open: boolean) => void;
   onRemindLater?: (message: TimelineMessage) => void;
+  onReply?: (message: TimelineMessage) => void;
   onSendToChannel?: (message: TimelineMessage) => Promise<void>;
   onUnfollowThread?: (message: TimelineMessage) => void;
   open: boolean;
+  quickReactionTray?: React.ReactNode;
+  side?: "bottom" | "top";
   isFollowingThread?: boolean;
   isUnread?: boolean;
-}) {
+};
+
+function MoreActionsMenu({
+  channelId,
+  compact = false,
+  message,
+  onDelete,
+  onEdit,
+  onFollowThread,
+  onMarkUnread,
+  onMarkRead,
+  onOpenChange,
+  onRemindLater,
+  onReply,
+  onSendToChannel,
+  onUnfollowThread,
+  open,
+  quickReactionTray,
+  side = "top",
+  isFollowingThread,
+  isUnread,
+}: MoreActionsMenuProps) {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   const [isReportDialogOpen, setIsReportDialogOpen] = React.useState(false);
   // Set true the moment the user picks "Edit message". The
@@ -117,13 +127,19 @@ function MoreActionsMenu({
             <DropdownMenuTrigger asChild>
               <Button
                 aria-label="More actions"
-                className={ACTION_BUTTON_CLASS}
+                className={cn(
+                  ACTION_BUTTON_CLASS,
+                  compact &&
+                    "h-6 w-6 min-w-6 border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm hover:bg-muted",
+                )}
                 data-testid={`more-actions-${message.id}`}
                 size="sm"
                 type="button"
                 variant={open ? "secondary" : "ghost"}
               >
-                <EllipsisVertical className={ACTION_ICON_CLASS} />
+                <EllipsisVertical
+                  className={cn(ACTION_ICON_CLASS, compact && "!h-3.5 !w-3.5")}
+                />
               </Button>
             </DropdownMenuTrigger>
           </TooltipTrigger>
@@ -131,7 +147,7 @@ function MoreActionsMenu({
         </Tooltip>
         <DropdownMenuContent
           align="end"
-          side="top"
+          side={side}
           sideOffset={6}
           onCloseAutoFocus={(event) => {
             if (editJustSelectedRef.current) {
@@ -140,6 +156,29 @@ function MoreActionsMenu({
             }
           }}
         >
+          {quickReactionTray ? (
+            <>
+              <div
+                className="flex items-center justify-center gap-0.5 px-1 py-0.5"
+                data-testid={`message-quick-reactions-${message.id}`}
+              >
+                {quickReactionTray}
+              </div>
+              <DropdownMenuSeparator />
+            </>
+          ) : null}
+          {onReply ? (
+            <DropdownMenuItem
+              data-testid={`reply-message-${message.id}`}
+              onClick={() => {
+                onReply(message);
+              }}
+            >
+              <CornerUpLeft className="h-4 w-4" />
+              Reply
+            </DropdownMenuItem>
+          ) : null}
+
           {onEdit ? (
             <DropdownMenuItem
               data-testid={`edit-message-${message.id}`}
@@ -316,6 +355,20 @@ function MoreActionsMenu({
   );
 }
 
+export const MessageMoreActionsMenu = React.memo(
+  function MessageMoreActionsMenu(
+    props: Omit<MoreActionsMenuProps, "onOpenChange" | "open">,
+  ) {
+    const [isOpen, setIsOpen] = React.useState(false);
+
+    return (
+      <MoreActionsMenu {...props} onOpenChange={setIsOpen} open={isOpen} />
+    );
+  },
+);
+
+MessageMoreActionsMenu.displayName = "MessageMoreActionsMenu";
+
 function QuickReactionButton({
   customEmojiUrl,
   emoji,
@@ -379,6 +432,8 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   reactions,
   isFollowingThread,
   isUnread,
+  presentation = "tray",
+  actions = "all",
 }: {
   /** Channel UUID — required for the "Copy link" action; when omitted the
    *  action is hidden (callers like the home inbox that lack the context). */
@@ -398,6 +453,8 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   reactionErrorMessage?: string | null;
   reactions: TimelineReaction[];
   isFollowingThread?: boolean;
+  presentation?: "inline" | "menu" | "tray";
+  actions?: "all" | "reaction-only";
   /** Current read state of the clicked message, from the same predicate the
    *  unread badge uses. Drives the single mark-read/unread toggle label. */
   isUnread?: boolean;
@@ -418,19 +475,20 @@ export const MessageActionBar = React.memo(function MessageActionBar({
         ),
     [customEmoji, quickReactionEmojis],
   );
-  const hasReplyAction = Boolean(onReply);
+  const hasReplyAction = actions === "all" && Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
 
   const hasMoreMenuActions =
-    Boolean(onEdit) ||
-    Boolean(onDelete) ||
-    Boolean(onMarkUnread) ||
-    Boolean(onMarkRead) ||
-    Boolean(onFollowThread) ||
-    Boolean(onUnfollowThread) ||
-    Boolean(onRemindLater) ||
-    Boolean(onSendToChannel) ||
-    !message.pending;
+    actions === "all" &&
+    (Boolean(onEdit) ||
+      Boolean(onDelete) ||
+      Boolean(onMarkUnread) ||
+      Boolean(onMarkRead) ||
+      Boolean(onFollowThread) ||
+      Boolean(onUnfollowThread) ||
+      Boolean(onRemindLater) ||
+      Boolean(onSendToChannel) ||
+      !message.pending);
 
   const wouldAddReaction = React.useCallback(
     (emoji: string) =>
@@ -440,7 +498,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
     [reactions],
   );
   const handleReactionSelection = React.useCallback(
-    (emoji: string, closePicker = false) => {
+    (emoji: string, closePicker = false, closeMenu = false) => {
       if (!onReactionSelect) {
         return;
       }
@@ -458,6 +516,9 @@ export const MessageActionBar = React.memo(function MessageActionBar({
           if (closePicker) {
             setIsReactionPickerOpen(false);
           }
+          if (closeMenu) {
+            setIsDropdownOpen(false);
+          }
         });
     },
     [onReactionBadgeBurstRequest, onReactionSelect, wouldAddReaction],
@@ -467,10 +528,70 @@ export const MessageActionBar = React.memo(function MessageActionBar({
     return null;
   }
 
+  const reactionPickerNode = hasReactionAction ? (
+    <Popover onOpenChange={setIsReactionPickerOpen} open={isReactionPickerOpen}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <Button
+              aria-label="Open reactions"
+              className={ACTION_BUTTON_CLASS}
+              data-testid={`react-message-${message.id}`}
+              size="sm"
+              type="button"
+              variant={isReactionPickerOpen ? "secondary" : "ghost"}
+            >
+              <SmilePlus className={ACTION_ICON_CLASS} />
+            </Button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent>React</TooltipContent>
+      </Tooltip>
+      <PopoverContent
+        align="end"
+        className="w-auto overflow-hidden rounded-2xl border-0 bg-transparent p-0 shadow-none"
+        side="top"
+        sideOffset={10}
+      >
+        {reactionErrorMessage ? (
+          <div className="px-3 pb-0 pt-3">
+            <p className="text-xs text-destructive">{reactionErrorMessage}</p>
+          </div>
+        ) : null}
+        <EmojiPicker
+          autoFocus
+          onSelect={(value) => {
+            // `value` is already a `native` glyph or a `:shortcode:` for
+            // custom emoji; the toggle mutation resolves the URL.
+            handleReactionSelection(value, true, presentation === "menu");
+          }}
+        />
+      </PopoverContent>
+    </Popover>
+  ) : null;
+
+  const combinedQuickReactionTray =
+    presentation === "menu" && hasReactionAction ? (
+      <>
+        {quickReactionItems.map(({ customEmojiUrl, emoji }) => (
+          <QuickReactionButton
+            customEmojiUrl={customEmojiUrl}
+            emoji={emoji}
+            key={emoji}
+            onSelect={(value) => {
+              handleReactionSelection(value, false, true);
+            }}
+          />
+        ))}
+        {reactionPickerNode}
+      </>
+    ) : null;
+
   return (
     <div
       className={cn(
-        "-m-1 p-1 transition-opacity duration-150 ease-out",
+        "transition-opacity duration-150 ease-out",
+        presentation === "tray" && "-m-1 p-1",
         "opacity-100 sm:pointer-events-none sm:opacity-0",
         "sm:group-hover/message:pointer-events-auto sm:group-hover/message:opacity-100",
         "sm:group-focus-within/message:pointer-events-auto sm:group-focus-within/message:opacity-100",
@@ -478,97 +599,27 @@ export const MessageActionBar = React.memo(function MessageActionBar({
           ? "sm:pointer-events-auto sm:opacity-100"
           : "",
       )}
+      data-presentation={presentation}
       data-testid={`message-action-bar-${message.id}`}
     >
-      <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
-        <div className="flex items-center gap-0.5 p-1">
-          {hasReactionAction && quickReactionItems.length > 0 ? (
-            <>
-              <div className="hidden items-center gap-0.5 sm:flex">
-                {quickReactionItems.map(({ customEmojiUrl, emoji }) => (
-                  <QuickReactionButton
-                    customEmojiUrl={customEmojiUrl}
-                    emoji={emoji}
-                    key={emoji}
-                    onSelect={handleReactionSelection}
-                  />
-                ))}
-              </div>
-              <div className="mx-0.5 hidden h-4 w-px bg-border/70 sm:block" />
-            </>
-          ) : null}
-
-          {hasReactionAction ? (
-            <Popover
-              onOpenChange={setIsReactionPickerOpen}
-              open={isReactionPickerOpen}
-            >
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <PopoverTrigger asChild>
-                    <Button
-                      aria-label="Open reactions"
-                      className={ACTION_BUTTON_CLASS}
-                      data-testid={`react-message-${message.id}`}
-                      size="sm"
-                      type="button"
-                      variant={isReactionPickerOpen ? "secondary" : "ghost"}
-                    >
-                      <SmilePlus className={ACTION_ICON_CLASS} />
-                    </Button>
-                  </PopoverTrigger>
-                </TooltipTrigger>
-                <TooltipContent>React</TooltipContent>
-              </Tooltip>
-              <PopoverContent
-                align="end"
-                className="w-auto p-0 rounded-2xl overflow-hidden border-0 bg-transparent shadow-none"
-                side="top"
-                sideOffset={10}
-              >
-                {reactionErrorMessage ? (
-                  <div className="px-3 pt-3 pb-0">
-                    <p className="text-xs text-destructive">
-                      {reactionErrorMessage}
-                    </p>
-                  </div>
-                ) : null}
-                <EmojiPicker
-                  autoFocus
-                  onSelect={(value) => {
-                    // `value` is already a `native` glyph or a `:shortcode:` for
-                    // custom emoji; the toggle mutation resolves the URL.
-                    handleReactionSelection(value, true);
-                  }}
-                />
-              </PopoverContent>
-            </Popover>
-          ) : null}
-
-          {hasReplyAction ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  aria-label="Reply"
-                  className={ACTION_BUTTON_CLASS}
-                  data-testid={`reply-message-${message.id}`}
-                  onClick={() => {
-                    onReply?.(message);
-                  }}
-                  size="sm"
-                  type="button"
-                  variant="ghost"
-                >
-                  <CornerUpLeft className={ACTION_ICON_CLASS} />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Reply</TooltipContent>
-            </Tooltip>
-          ) : null}
-
-          {hasMoreMenuActions ? (
+      <div
+        className={cn(
+          presentation === "tray" &&
+            "overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85",
+        )}
+      >
+        <div
+          className={cn(
+            "flex items-center gap-0.5",
+            presentation === "tray"
+              ? "p-1"
+              : "gap-0 bg-background [&_button]:h-6 [&_button]:w-6",
+          )}
+        >
+          {presentation === "menu" ? (
             <MoreActionsMenu
               channelId={channelId}
+              compact
               message={message}
               onDelete={onDelete}
               onEdit={onEdit}
@@ -577,13 +628,78 @@ export const MessageActionBar = React.memo(function MessageActionBar({
               onMarkRead={onMarkRead}
               onOpenChange={setIsDropdownOpen}
               onRemindLater={onRemindLater}
+              onReply={onReply}
               onSendToChannel={onSendToChannel}
               onUnfollowThread={onUnfollowThread}
               open={isDropdownOpen}
+              quickReactionTray={combinedQuickReactionTray}
+              side="bottom"
               isFollowingThread={isFollowingThread}
               isUnread={isUnread}
             />
-          ) : null}
+          ) : (
+            <>
+              {presentation === "tray" &&
+              hasReactionAction &&
+              quickReactionItems.length > 0 ? (
+                <>
+                  <div className="hidden items-center gap-0.5 sm:flex">
+                    {quickReactionItems.map(({ customEmojiUrl, emoji }) => (
+                      <QuickReactionButton
+                        customEmojiUrl={customEmojiUrl}
+                        emoji={emoji}
+                        key={emoji}
+                        onSelect={handleReactionSelection}
+                      />
+                    ))}
+                  </div>
+                  <div className="mx-0.5 hidden h-4 w-px bg-border/70 sm:block" />
+                </>
+              ) : null}
+
+              {reactionPickerNode}
+
+              {hasReplyAction ? (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label="Reply"
+                      className={ACTION_BUTTON_CLASS}
+                      data-testid={`reply-message-${message.id}`}
+                      onClick={() => {
+                        onReply?.(message);
+                      }}
+                      size="sm"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <CornerUpLeft className={ACTION_ICON_CLASS} />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Reply</TooltipContent>
+                </Tooltip>
+              ) : null}
+
+              {hasMoreMenuActions ? (
+                <MoreActionsMenu
+                  channelId={channelId}
+                  message={message}
+                  onDelete={onDelete}
+                  onEdit={onEdit}
+                  onFollowThread={onFollowThread}
+                  onMarkUnread={onMarkUnread}
+                  onMarkRead={onMarkRead}
+                  onOpenChange={setIsDropdownOpen}
+                  onRemindLater={onRemindLater}
+                  onSendToChannel={onSendToChannel}
+                  onUnfollowThread={onUnfollowThread}
+                  open={isDropdownOpen}
+                  isFollowingThread={isFollowingThread}
+                  isUnread={isUnread}
+                />
+              ) : null}
+            </>
+          )}
         </div>
       </div>
     </div>

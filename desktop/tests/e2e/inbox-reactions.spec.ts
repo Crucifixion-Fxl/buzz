@@ -36,6 +36,9 @@ type MockWindow = Window & {
 test("inbox reaction on a thread-reply mention persists after refetch", async ({
   page,
 }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz.appearance.messageStyle", "bubbles");
+  });
   await installMockBridge(page);
   await page.goto("/");
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
@@ -141,16 +144,33 @@ test("inbox reaction on a thread-reply mention persists after refetch", async ({
 
   await selectedMessage.hover();
   const actionBar = page.getByTestId(`message-action-bar-${replyEvent.id}`);
-  const [actionBarBox, selectedMessageBox] = await Promise.all([
-    actionBar.boundingBox(),
-    selectedMessage.boundingBox(),
-  ]);
+  const [actionBarBox, actionBarAnchorBox, bubbleBox, selectedMessageBox] =
+    await Promise.all([
+      actionBar.boundingBox(),
+      actionBar.locator("..").boundingBox(),
+      selectedMessage.getByTestId("message-body-surface").boundingBox(),
+      selectedMessage.boundingBox(),
+    ]);
   expect(actionBarBox).not.toBeNull();
+  expect(actionBarAnchorBox).not.toBeNull();
+  expect(bubbleBox).not.toBeNull();
   expect(selectedMessageBox).not.toBeNull();
-  if (!actionBarBox || !selectedMessageBox) {
+  if (
+    !actionBarBox ||
+    !actionBarAnchorBox ||
+    !bubbleBox ||
+    !selectedMessageBox
+  ) {
     throw new Error("Inbox message action bar bounds were unavailable.");
   }
   expect(actionBarBox.y).toBeGreaterThanOrEqual(selectedMessageBox.y);
+  expect(
+    Math.abs(
+      actionBarAnchorBox.x +
+        actionBarAnchorBox.width -
+        (bubbleBox.x + bubbleBox.width),
+    ),
+  ).toBeLessThanOrEqual(1);
 
   await selectedMessage
     .getByRole("button", { name: "React with :+1:" })
@@ -161,6 +181,28 @@ test("inbox reaction on a thread-reply mention persists after refetch", async ({
   // land before asserting, then assert the pill is still there.
   const reactions = selectedMessage.getByTestId("message-reactions");
   await expect(reactions).toContainText("👍");
+  await expect(
+    selectedMessage.getByTestId("message-body-surface"),
+  ).toBeVisible();
+  const reactionPresentation = await reactions
+    .getByLabel("Toggle 👍 reaction")
+    .evaluate((pill) => {
+      const style = getComputedStyle(pill);
+      const bubble = pill
+        .closest("[data-testid^='home-inbox-']")
+        ?.querySelector<HTMLElement>("[data-testid='message-body-surface']");
+      if (!bubble) throw new Error("Inbox message bubble is missing.");
+      const pillRect = pill.getBoundingClientRect();
+      const bubbleRect = bubble.getBoundingClientRect();
+      return {
+        backgroundColor: style.backgroundColor,
+        opacity: Number(style.opacity),
+        overlapsBubble: pillRect.top < bubbleRect.bottom,
+      };
+    });
+  expect(reactionPresentation.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  expect(reactionPresentation.opacity).toBe(1);
+  expect(reactionPresentation.overlapsBubble).toBe(true);
   await page.waitForTimeout(1_500);
   await expect(reactions).toContainText("👍");
   await page.screenshot({ path: `${SHOTS}/01-pill-after-refetch.png` });

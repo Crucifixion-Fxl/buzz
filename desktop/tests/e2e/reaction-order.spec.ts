@@ -53,15 +53,42 @@ async function getPillOrder(
   return labels;
 }
 
-async function getBodyToReactionGap(
+async function getReactionBubbleGeometry(
   row: import("@playwright/test").Locator,
-): Promise<number> {
-  const body = await row.locator(".message-markdown").first().boundingBox();
-  const reactions = await row.getByTestId("message-reactions").boundingBox();
-  if (!body || !reactions) {
-    throw new Error("message body or reactions are not laid out");
+): Promise<{
+  backgroundColor: string;
+  leftInset: number;
+  opacity: number;
+  overlap: number;
+  rootFontSize: number;
+}> {
+  const bubble = await row.getByTestId("message-body-surface").boundingBox();
+  const reactionBar = row.getByTestId("message-reactions");
+  const firstPill = reactionBar.getByRole("button").first();
+  const [reactions, firstPillBox, pillStyle] = await Promise.all([
+    reactionBar.boundingBox(),
+    firstPill.boundingBox(),
+    firstPill.evaluate((pill) => {
+      const style = getComputedStyle(pill);
+      return {
+        backgroundColor: style.backgroundColor,
+        opacity: Number(style.opacity),
+      };
+    }),
+  ]);
+  if (!bubble || !reactions || !firstPillBox) {
+    throw new Error("message bubble or reactions are not laid out");
   }
-  return Math.round(reactions.y - (body.y + body.height));
+  const rootFontSize = await row.evaluate(() =>
+    Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
+  );
+  return {
+    backgroundColor: pillStyle.backgroundColor,
+    leftInset: firstPillBox.x - bubble.x,
+    opacity: pillStyle.opacity,
+    overlap: reactions.y - (bubble.y + bubble.height),
+    rootFontSize,
+  };
 }
 
 /** Click a quick-reaction tray button by emoji (hover → click tray button). */
@@ -83,6 +110,9 @@ async function addQuickReaction(
 }
 
 test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz.appearance.messageStyle", "bubbles");
+  });
   await installMockBridge(page);
 });
 
@@ -105,7 +135,18 @@ test("reaction pills render left-to-right in the order reactions were added", as
 
   const pills = await getPillOrder(row);
   expect(pills).toEqual(["👍", "❤️", "😂"]);
-  await expect.poll(() => getBodyToReactionGap(row)).toBe(6);
+  await expect
+    .poll(async () => {
+      const geometry = await getReactionBubbleGeometry(row);
+      const expectedInset = geometry.rootFontSize * 0.75;
+      return (
+        Math.abs(geometry.leftInset - expectedInset) <= 1 &&
+        Math.abs(geometry.overlap + expectedInset) <= 1 &&
+        geometry.opacity === 1 &&
+        geometry.backgroundColor !== "rgba(0, 0, 0, 0)"
+      );
+    })
+    .toBe(true);
 
   // Screenshot for PR visual proof.
   const screenshotDir = path.resolve("test-results/reaction-order-screenshots");

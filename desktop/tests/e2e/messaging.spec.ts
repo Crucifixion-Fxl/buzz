@@ -45,8 +45,10 @@ async function expectThreadReplyUnobscured(row: Locator) {
 async function measureThreadSummaryGeometry(summaryRow: Locator) {
   return summaryRow.evaluate((summaryButton) => {
     const summaryWrapper = summaryButton.parentElement;
-    const container = summaryWrapper?.parentElement;
-    const messageRow = container?.querySelector<HTMLElement>(
+    const bodySurface = summaryButton.closest<HTMLElement>(
+      '[data-testid="message-body-surface"]',
+    );
+    const messageRow = summaryButton.closest<HTMLElement>(
       '[data-testid="message-row"]',
     );
     const messageMarkdown =
@@ -64,7 +66,7 @@ async function measureThreadSummaryGeometry(summaryRow: Locator) {
 
     if (
       !summaryWrapper ||
-      !container ||
+      !bodySurface ||
       !messageRow ||
       !messageAuthor ||
       !messageMarkdown ||
@@ -74,8 +76,8 @@ async function measureThreadSummaryGeometry(summaryRow: Locator) {
       throw new Error("Expected measurable thread summary geometry.");
     }
 
-    const containerRect = container.getBoundingClientRect();
-    const messageRowRect = messageRow.getBoundingClientRect();
+    const bodySurfaceRect = bodySurface.getBoundingClientRect();
+    const bodySurfaceStyle = getComputedStyle(bodySurface);
     const messageAuthorRect = messageAuthor.getBoundingClientRect();
     const messageMarkdownRect = messageMarkdown.getBoundingClientRect();
     const summaryButtonRect = summaryButton.getBoundingClientRect();
@@ -84,6 +86,7 @@ async function measureThreadSummaryGeometry(summaryRow: Locator) {
       summaryButtonStyle.paddingLeft,
     );
     const summaryWrapperRect = summaryWrapper.getBoundingClientRect();
+    const summaryWrapperStyle = getComputedStyle(summaryWrapper);
     const firstAvatarRect = firstAvatar.getBoundingClientRect();
     const summarySurfaceRect = summarySurface.getBoundingClientRect();
 
@@ -91,19 +94,29 @@ async function measureThreadSummaryGeometry(summaryRow: Locator) {
       authorLeft: messageAuthorRect.left,
       avatarLeft: firstAvatarRect.left,
       bodyLeft: messageMarkdownRect.left,
-      bottomPadding: containerRect.bottom - summaryWrapperRect.bottom,
-      messageRowLeft: messageRowRect.left,
+      bodySurfaceLeft: bodySurfaceRect.left,
+      bodySurfacePaddingLeft: Number.parseFloat(bodySurfaceStyle.paddingLeft),
+      rootFontSize: Number.parseFloat(
+        getComputedStyle(document.documentElement).fontSize,
+      ),
+      bottomPadding: bodySurfaceRect.bottom - summaryWrapperRect.bottom,
       summaryButtonContentLeft:
         summaryButtonRect.left + summaryButtonPaddingLeft,
       summaryButtonLeft: summaryButtonRect.left,
       summaryButtonPaddingLeft,
       summarySurfaceLeft: summarySurfaceRect.left,
-      topPadding: messageRowRect.top - containerRect.top,
+      summaryTopPadding: Number.parseFloat(summaryWrapperStyle.paddingTop),
+      topPadding: messageMarkdownRect.top - bodySurfaceRect.top,
     };
   });
 }
 
 test.beforeEach(async ({ page }, testInfo) => {
+  if (testInfo.title.includes("opens a single-level thread panel")) {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("buzz.appearance.messageStyle", "bubbles");
+    });
+  }
   const baseMock = testInfo.title.includes("agent owner label")
     ? {
         searchProfiles: [
@@ -2045,7 +2058,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   page,
 }) => {
   const timestamp = Date.now();
-  const firstReply = `First threaded reply ${timestamp}`;
+  const firstReply = `First threaded reply ${timestamp} with enough detail to wrap against the full thread message width`;
   const siblingReply = `Sibling threaded reply ${timestamp}`;
   const nestedReply = `Nested threaded reply ${timestamp}`;
   const nestedReplyFromBob = `Nested reply from Bob ${timestamp}`;
@@ -2055,6 +2068,19 @@ test("opens a single-level thread panel with inline expansion", async ({
   );
 
   await page.goto("/");
+  if (
+    (await page.locator("html").getAttribute("data-message-style")) !==
+    "bubbles"
+  ) {
+    await page.evaluate(() => {
+      window.localStorage.setItem("buzz.appearance.messageStyle", "bubbles");
+    });
+    await page.reload();
+  }
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-message-style",
+    "bubbles",
+  );
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("message-timeline")).toContainText(
@@ -2078,7 +2104,8 @@ test("opens a single-level thread panel with inline expansion", async ({
   );
 
   await rootMessage.hover();
-  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await rootMessage.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Reply", exact: true }).click();
   await expect(threadPanel).toBeVisible();
   await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
     "Welcome to #general",
@@ -2127,47 +2154,55 @@ test("opens a single-level thread panel with inline expansion", async ({
         .first()
         .evaluate((wrapper) => {
           const avatar = wrapper.firstElementChild;
-          if (!(avatar instanceof HTMLElement)) return "missing";
+          if (!(avatar instanceof HTMLElement)) return false;
           const rect = avatar.getBoundingClientRect();
-          return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
+          const expectedSize =
+            Number.parseFloat(
+              getComputedStyle(document.documentElement).fontSize,
+            ) * 1.5;
+          return (
+            Math.abs(rect.width - expectedSize) <= 1 &&
+            Math.abs(rect.height - expectedSize) <= 1
+          );
         }),
     )
-    .toBe("24x24");
+    .toBe(true);
   const summaryGeometry = await measureThreadSummaryGeometry(rootSummaryRow);
   expect(
-    Math.abs(summaryGeometry.authorLeft - summaryGeometry.bodyLeft),
+    Math.abs(summaryGeometry.authorLeft - summaryGeometry.bodySurfaceLeft),
   ).toBeLessThanOrEqual(1);
-  expect(
-    Math.abs(summaryGeometry.avatarLeft - summaryGeometry.bodyLeft),
-  ).toBeLessThanOrEqual(1);
-  expect(
-    Math.abs(
-      summaryGeometry.summaryButtonContentLeft - summaryGeometry.bodyLeft,
-    ),
-  ).toBeLessThanOrEqual(1);
-  expect(
-    Math.abs(
-      summaryGeometry.summaryButtonLeft - summaryGeometry.messageRowLeft,
-    ),
-  ).toBeLessThanOrEqual(1);
-  expect(summaryGeometry.summaryButtonLeft).toBeLessThan(
-    summaryGeometry.bodyLeft,
-  );
   expect(
     Math.abs(
       summaryGeometry.bodyLeft -
-        summaryGeometry.summaryButtonLeft -
-        summaryGeometry.summaryButtonPaddingLeft,
+        summaryGeometry.bodySurfaceLeft -
+        summaryGeometry.bodySurfacePaddingLeft,
     ),
   ).toBeLessThanOrEqual(1);
-  expect(summaryGeometry.summarySurfaceLeft).toBeLessThan(
-    summaryGeometry.avatarLeft,
-  );
+  const avatarInset = summaryGeometry.rootFontSize * 0.25;
   expect(
     Math.abs(
-      summaryGeometry.avatarLeft - summaryGeometry.summarySurfaceLeft - 4,
+      summaryGeometry.avatarLeft - summaryGeometry.bodyLeft - avatarInset,
     ),
   ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      summaryGeometry.summaryButtonContentLeft -
+        summaryGeometry.bodyLeft -
+        avatarInset,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(summaryGeometry.summaryButtonLeft - summaryGeometry.bodyLeft),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(summaryGeometry.summaryButtonPaddingLeft - avatarInset),
+  ).toBeLessThanOrEqual(0.01);
+  expect(
+    Math.abs(summaryGeometry.summarySurfaceLeft - summaryGeometry.bodyLeft),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    summaryGeometry.summaryTopPadding / summaryGeometry.rootFontSize,
+  ).toBeCloseTo(0.375, 4);
   expect(
     Math.abs(summaryGeometry.topPadding - summaryGeometry.bottomPadding),
   ).toBeLessThanOrEqual(1);
@@ -2235,7 +2270,110 @@ test("opens a single-level thread panel with inline expansion", async ({
     .filter({ hasText: firstReply })
     .first();
   await firstReplyRow.hover();
-  await firstReplyRow.getByRole("button", { name: "Reply" }).click();
+  const inlineActions = firstReplyRow.locator(
+    '[data-testid^="message-action-bar-"]',
+  );
+  await expect(inlineActions).toHaveAttribute("data-presentation", "menu");
+  await expect(inlineActions.locator('[aria-label^="React with"]')).toHaveCount(
+    0,
+  );
+  await expect(
+    inlineActions.getByRole("button", { name: "Open reactions" }),
+  ).toHaveCount(0);
+  await expect(
+    inlineActions.getByRole("button", { name: "Reply" }),
+  ).toHaveCount(0);
+  const compactMoreActions = firstReplyRow.getByRole("button", {
+    name: "More actions",
+  });
+  await expect(compactMoreActions).toBeVisible();
+  const [compactMoreActionsBox, threadResizeHandleBox] = await Promise.all([
+    compactMoreActions.boundingBox(),
+    page.getByTestId("right-auxiliary-pane-resize-handle").boundingBox(),
+  ]);
+  if (!compactMoreActionsBox || !threadResizeHandleBox) {
+    throw new Error("Expected measurable thread action gutter.");
+  }
+  expect(compactMoreActionsBox.x).toBeGreaterThanOrEqual(
+    threadResizeHandleBox.x + threadResizeHandleBox.width,
+  );
+  const [inlineActionsBox, replyBubbleBox, rootFontSize] = await Promise.all([
+    inlineActions.boundingBox(),
+    firstReplyRow.getByTestId("message-body-surface").boundingBox(),
+    page.evaluate(() =>
+      Number.parseFloat(getComputedStyle(document.documentElement).fontSize),
+    ),
+  ]);
+  if (!inlineActionsBox || !replyBubbleBox) {
+    throw new Error("Expected top-right thread action geometry.");
+  }
+  expect(
+    Math.abs(
+      inlineActionsBox.x +
+        inlineActionsBox.width -
+        replyBubbleBox.x -
+        replyBubbleBox.width -
+        rootFontSize * 0.5,
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(inlineActionsBox.y - replyBubbleBox.y + rootFontSize * 0.5),
+  ).toBeLessThanOrEqual(1);
+  await compactMoreActions.click();
+  await expect(page.getByRole("menu")).toBeVisible();
+  await expect(
+    page.locator('[data-testid^="message-quick-reactions-"]'),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Reply", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /^React with / }).first(),
+  ).toBeVisible();
+  const [threadContentColumnBox, threadComposerBox, threadRowFrame] =
+    await Promise.all([
+      firstReplyRow.getByTestId("message-content-column").boundingBox(),
+      threadPanel.getByTestId("message-composer").boundingBox(),
+      firstReplyRow.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return {
+          contentLeft: rect.left + Number.parseFloat(style.paddingLeft),
+          contentRight: rect.right - Number.parseFloat(style.paddingRight),
+        };
+      }),
+    ]);
+  if (!threadContentColumnBox || !threadComposerBox) {
+    throw new Error("Expected measurable thread content alignment.");
+  }
+  expect(
+    Math.abs(
+      threadContentColumnBox.x +
+        threadContentColumnBox.width -
+        (threadComposerBox.x + threadComposerBox.width),
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      replyBubbleBox.x +
+        replyBubbleBox.width -
+        (threadComposerBox.x + threadComposerBox.width),
+    ),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(threadRowFrame.contentLeft - threadComposerBox.x),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(
+      threadRowFrame.contentRight -
+        (threadComposerBox.x + threadComposerBox.width),
+    ),
+  ).toBeLessThanOrEqual(1);
+  await waitForAnimations(page);
+  await threadPanel.screenshot({
+    path: "test-results/message-feedback/thread-inline-actions.png",
+  });
+  await page.getByRole("menuitem", { name: "Reply", exact: true }).click();
 
   await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
     "Welcome to #general",
@@ -2309,6 +2447,11 @@ test("opens a single-level thread panel with inline expansion", async ({
         ),
     )
     .toBe("1,2");
+  await page.mouse.move(0, 0);
+  await waitForAnimations(page);
+  await rootMessage.screenshot({
+    path: "test-results/message-feedback/thread-summary-in-bubble.png",
+  });
 
   await expectThreadReplyUnobscured(nestedReplyRow);
 
@@ -2329,7 +2472,7 @@ test("thread panel width uses session storage and reset handle", async ({
   page,
 }) => {
   const customWidthPx = 520;
-  const defaultWidthPx = 380;
+  const defaultWidthPx = 420;
 
   await page.addInitScript((width) => {
     window.sessionStorage.setItem(
@@ -2372,6 +2515,40 @@ test("thread panel width uses session storage and reset handle", async ({
       });
     })
     .toBe(defaultWidthPx);
+
+  const gutters = await threadPanel.evaluate((panel) => {
+    const messageGutter = panel.querySelector<HTMLElement>(
+      '[data-testid="message-thread-head"]',
+    );
+    const composer = panel.querySelector<HTMLElement>(
+      '[data-testid="message-composer"]',
+    );
+    const composerGutter = composer?.closest("footer");
+    if (!messageGutter || !composerGutter) {
+      throw new Error("Expected thread message and composer gutters.");
+    }
+    const rootFontSize = Number.parseFloat(
+      getComputedStyle(document.documentElement).fontSize,
+    );
+    return {
+      composerPaddingLeft: Number.parseFloat(
+        getComputedStyle(composerGutter).paddingLeft,
+      ),
+      messagePaddingLeft: Number.parseFloat(
+        getComputedStyle(messageGutter).paddingLeft,
+      ),
+      rootFontSize,
+    };
+  });
+  expect(gutters.messagePaddingLeft / gutters.rootFontSize).toBeCloseTo(0.5, 4);
+  expect(gutters.composerPaddingLeft / gutters.rootFontSize).toBeCloseTo(
+    1.25,
+    4,
+  );
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: "test-results/message-feedback/thread-panel-default-width.png",
+  });
 
   await threadPanel.getByTestId("auxiliary-panel-close").click();
   await expect(threadPanel).toBeHidden();

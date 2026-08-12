@@ -9,6 +9,7 @@ import {
 import { useCommunities } from "@/features/communities/useCommunities";
 import { AvatarFramingSlider } from "@/features/profile/ui/AnimatedAvatarControls";
 import { contrastColorForBackground } from "@/features/profile/ui/ProfileAvatarEditor.utils";
+import { cn } from "@/shared/lib/cn";
 import {
   setLinkPreviewStyle,
   useLinkPreviewStyle,
@@ -26,6 +27,13 @@ import {
   useFontSize,
   type FontSize,
 } from "@/shared/lib/fontSizePreference";
+import {
+  previewMessageStyle,
+  setMessageStyle,
+  useMessageStyle,
+  useSavedMessageStyle,
+  type MessageStyle,
+} from "@/shared/lib/messageStylePreference";
 import {
   ACCENT_COLORS,
   DEFAULT_GLASS_OPACITY,
@@ -129,6 +137,23 @@ const FONT_SIZE_OPTIONS: readonly {
   },
 ];
 
+const MESSAGE_STYLE_OPTIONS: readonly {
+  value: MessageStyle;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "classic",
+    label: "Open",
+    description: "Messages sit directly in the conversation.",
+  },
+  {
+    value: "bubbles",
+    label: "Bubbles",
+    description: "Messages sit inside rounded bubbles.",
+  },
+];
+
 function ConversationDensityPreviewMessage({
   avatar,
   author,
@@ -140,6 +165,9 @@ function ConversationDensityPreviewMessage({
   children: ReactNode;
   timestamp: string;
 }) {
+  const messageStyle = useMessageStyle();
+  const showBubble = messageStyle === "bubbles";
+
   return (
     <article className="flex gap-2.5 py-conversation-row">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold text-muted-foreground">
@@ -154,7 +182,13 @@ function ConversationDensityPreviewMessage({
             {timestamp}
           </span>
         </div>
-        <div className="mt-conversation-body text-message font-normal tracking-normal text-foreground">
+        <div
+          className={cn(
+            "mt-conversation-body w-fit max-w-full text-message font-normal tracking-normal text-foreground",
+            showBubble && "rounded-2xl bg-muted/50 px-3.5 py-2.5",
+          )}
+          data-testid="conversation-preview-message-surface"
+        >
           {children}
         </div>
       </div>
@@ -204,6 +238,10 @@ function ConversationPreview() {
 export function ConversationDisplaySettings() {
   const density = useConversationDensity();
   const fontSize = useFontSize();
+  const messageStyle = useSavedMessageStyle();
+  const activeMessageStyle =
+    MESSAGE_STYLE_OPTIONS.find((option) => option.value === messageStyle) ??
+    MESSAGE_STYLE_OPTIONS[0];
 
   return (
     <>
@@ -247,6 +285,27 @@ export function ConversationDisplaySettings() {
           options={CONVERSATION_DENSITY_OPTIONS}
           testId="conversation-density-control"
           value={density}
+        />
+      </SettingsOptionRow>
+      <SettingsOptionRow data-testid="message-style-row">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Message layout</p>
+          <p
+            className="text-sm font-normal text-muted-foreground/70"
+            data-settings-subcopy
+          >
+            {activeMessageStyle.description}
+          </p>
+        </div>
+        <SettingsSegmentedControl
+          className="w-72"
+          legend="Message layout"
+          onPreviewChange={previewMessageStyle}
+          onValueChange={setMessageStyle}
+          optionTestIdPrefix="message-style"
+          options={MESSAGE_STYLE_OPTIONS}
+          testId="message-style-control"
+          value={messageStyle}
         />
       </SettingsOptionRow>
       <ConversationPreview />

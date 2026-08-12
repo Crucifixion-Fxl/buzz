@@ -10,6 +10,7 @@ const GLASS_OPACITY_STORAGE_KEY = "buzz-glass-opacity";
 const PROMINENT_ACTIVE_TAB_STORAGE_KEY = "buzz-prominent-active-tab";
 const CONVERSATION_DENSITY_STORAGE_KEY = "buzz.appearance.conversationDensity";
 const FONT_SIZE_STORAGE_KEY = "buzz.appearance.fontSize";
+const MESSAGE_STYLE_STORAGE_KEY = "buzz.appearance.messageStyle";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
@@ -1115,6 +1116,106 @@ test("app font size and conversation density apply independently", async ({
   });
 });
 
+test("message layout switches the Appearance preview between Open and Bubbles", async ({
+  page,
+}) => {
+  await seedTheme(page, "buzz");
+  await installMockBridge(page);
+  await openAppearance(page, "light");
+
+  const root = page.locator("html");
+  const control = page.getByTestId("message-style-control");
+  const classic = page.getByTestId("message-style-classic");
+  const bubbles = page.getByTestId("message-style-bubbles");
+  const description = page
+    .getByTestId("message-style-row")
+    .locator("[data-settings-subcopy]");
+  const previewSurface = page
+    .getByTestId("conversation-preview-message-surface")
+    .first();
+
+  await expect(control).toHaveAccessibleName("Message layout");
+  await expect(
+    page.getByTestId("conversation-density-row").evaluate((densityRow) => {
+      const messageLayoutRow = document.querySelector(
+        '[data-testid="message-style-row"]',
+      );
+      return messageLayoutRow
+        ? Boolean(
+            densityRow.compareDocumentPosition(messageLayoutRow) &
+              Node.DOCUMENT_POSITION_FOLLOWING,
+          )
+        : false;
+    }),
+  ).resolves.toBe(true);
+  await expect(root).toHaveAttribute("data-message-style", "classic");
+  await expect(classic).toHaveText("Open");
+  await expect(bubbles).toHaveText("Bubbles");
+  await expect(classic).toHaveAttribute("aria-pressed", "true");
+  await expect(description).toHaveText(
+    "Messages sit directly in the conversation.",
+  );
+  await expect(previewSurface).toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(previewSurface).toHaveCSS("padding-left", "0px");
+
+  await bubbles.click();
+  await expect(root).toHaveAttribute("data-message-style", "bubbles");
+  await expect(bubbles).toHaveAttribute("aria-pressed", "true");
+  await expect(description).toHaveText("Messages sit inside rounded bubbles.");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        MESSAGE_STYLE_STORAGE_KEY,
+      ),
+    )
+    .toBe("bubbles");
+  await expect(previewSurface).not.toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(previewSurface).toHaveCSS("border-radius", "17.1429px");
+  await expect(previewSurface).toHaveCSS("padding-left", "15px");
+
+  await waitForAnimations(page);
+  const indicator = page.getByTestId("message-style-control-indicator");
+  const [controlBox, classicBox, bubblesBox, indicatorBox] = await Promise.all([
+    control.boundingBox(),
+    classic.boundingBox(),
+    bubbles.boundingBox(),
+    indicator.boundingBox(),
+  ]);
+  expect(controlBox).not.toBeNull();
+  expect(classicBox).not.toBeNull();
+  expect(bubblesBox).not.toBeNull();
+  expect(indicatorBox).not.toBeNull();
+  if (!controlBox || !classicBox || !bubblesBox || !indicatorBox) {
+    throw new Error("Message layout control geometry is missing");
+  }
+  expect(Math.abs(classicBox.width - bubblesBox.width)).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs(classicBox.width + bubblesBox.width - controlBox.width),
+  ).toBeLessThanOrEqual(5);
+  expect(
+    Math.abs(
+      indicatorBox.x +
+        indicatorBox.width / 2 -
+        (bubblesBox.x + bubblesBox.width / 2),
+    ),
+  ).toBeLessThanOrEqual(0.5);
+
+  await page.getByTestId("appearance-preferences-card").screenshot({
+    path: `${SHOTS}/17-message-style-bubbles.png`,
+  });
+
+  await classic.click();
+  await expect(root).toHaveAttribute("data-message-style", "classic");
+  await expect(previewSurface).toHaveCSS("padding-left", "0px");
+});
+
 test("appearance picker — system tab (Buzz follows OS)", async ({ page }) => {
   await seedTheme(page, "buzz");
   await installMockBridge(page);
@@ -1531,6 +1632,8 @@ test("glass background keeps the content panel solid", async ({ page }) => {
     page.getByTestId("font-size-control-indicator"),
     page.getByTestId("conversation-density-control"),
     page.getByTestId("conversation-density-control-indicator"),
+    page.getByTestId("message-style-control"),
+    page.getByTestId("message-style-control-indicator"),
     page.getByTestId("theme-style-trigger"),
     page.getByTestId("link-preview-style-trigger"),
     page.getByTestId("thread-layout-trigger"),

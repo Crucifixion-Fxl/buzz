@@ -13,11 +13,17 @@ import {
   MessageHeaderRow,
 } from "@/features/messages/ui/MessageHeader";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
+import {
+  getMessageBubbleBottomPaddingClass,
+  getMessageBubbleLayout,
+  MESSAGE_BUBBLE_CONTENT_PADDING_CLASSES,
+} from "@/features/messages/ui/messageBubbleLayout";
 import { UnreadDivider } from "@/features/messages/ui/UnreadDivider";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
+import { useMessageStyle } from "@/shared/lib/messageStylePreference";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
 import { hasLinkPreviewSuppression } from "@/features/messages/lib/formatTimelineMessages";
@@ -33,6 +39,7 @@ type InboxMessageRowProps = {
   /** Channel UUID for "Copy link" — passed straight through to MessageActionBar. */
   channelId?: string | null;
   isContinuation?: boolean;
+  isFollowedByContinuation?: boolean;
   isFirst?: boolean;
   isFocusHighlightVisible: boolean;
   message: InboxDisplayMessage;
@@ -51,6 +58,7 @@ export function InboxMessageRow({
   canReply,
   channelId = null,
   isContinuation = false,
+  isFollowedByContinuation = false,
   isFirst = false,
   isFocusHighlightVisible,
   message,
@@ -59,6 +67,7 @@ export function InboxMessageRow({
   onToggleReaction,
   showUnreadBoundary = false,
 }: InboxMessageRowProps) {
+  const showMessageBubbles = useMessageStyle() === "bubbles";
   const timelineMessage = React.useMemo(
     () => toTimelineMessage(message),
     [message],
@@ -96,9 +105,47 @@ export function InboxMessageRow({
   const hoverTimestampLabel = formatTimeWithoutDayPeriod(
     message.timeLabel ?? message.fullTimestampLabel,
   );
+  const { radiusClass, rowSpacingClass } = getMessageBubbleLayout(
+    isContinuation,
+    isFollowedByContinuation,
+  );
+  const actionBarNode =
+    canReply || canToggleReactions || onEdit ? (
+      <div
+        className={cn(
+          "absolute top-1 z-10",
+          showMessageBubbles ? "right-0" : "right-2",
+          showMessageBubbles
+            ? isFirst
+              ? "sm:top-3"
+              : "sm:top-2 sm:-translate-y-1/2"
+            : !isFirst && "sm:top-0 sm:-translate-y-1/2",
+        )}
+      >
+        <MessageActionBar
+          channelId={channelId}
+          message={timelineMessage}
+          onEdit={onEdit ? () => onEdit(message) : undefined}
+          onReactionSelect={
+            canToggleReactions ? handleReactionSelect : undefined
+          }
+          onReactionBadgeBurstRequest={
+            reactionPending ? undefined : setBadgeBurstEmoji
+          }
+          onReply={canReply ? () => onSelectReplyTarget(message) : undefined}
+          reactionErrorMessage={reactionErrorMessage}
+          reactions={reactions}
+        />
+      </div>
+    ) : null;
 
   return (
-    <div className="relative px-2">
+    <div
+      className={cn(
+        "relative px-2",
+        showMessageBubbles && (isFollowedByContinuation ? "pb-0" : "pb-2.5"),
+      )}
+    >
       {showUnreadBoundary ? <UnreadDivider /> : null}
       {message.isSelected ? (
         <div
@@ -113,7 +160,10 @@ export function InboxMessageRow({
       ) : null}
       <article
         className={cn(
-          "group/message relative z-10 mx-1 flex gap-2.5 rounded-2xl px-2 py-conversation-row transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+          "group/message relative z-10 mx-1 flex gap-2.5 rounded-2xl px-2 transition-colors",
+          showMessageBubbles
+            ? rowSpacingClass
+            : "py-conversation-row hover:bg-muted/50 focus-within:bg-muted/50",
           isContinuation ? "items-center" : "items-start",
         )}
         data-message-id={message.id}
@@ -123,31 +173,7 @@ export function InboxMessageRow({
             : "home-inbox-context-message"
         }
       >
-        {canReply || canToggleReactions || onEdit ? (
-          <div
-            className={cn(
-              "absolute right-2 top-1 z-10",
-              !isFirst && "sm:top-0 sm:-translate-y-1/2",
-            )}
-          >
-            <MessageActionBar
-              channelId={channelId}
-              message={timelineMessage}
-              onEdit={onEdit ? () => onEdit(message) : undefined}
-              onReactionSelect={
-                canToggleReactions ? handleReactionSelect : undefined
-              }
-              onReactionBadgeBurstRequest={
-                reactionPending ? undefined : setBadgeBurstEmoji
-              }
-              onReply={
-                canReply ? () => onSelectReplyTarget(message) : undefined
-              }
-              reactionErrorMessage={reactionErrorMessage}
-              reactions={reactions}
-            />
-          </div>
-        ) : null}
+        {showMessageBubbles ? null : actionBarNode}
 
         {isContinuation ? (
           <div
@@ -210,30 +236,64 @@ export function InboxMessageRow({
             </MessageHeaderRow>
           )}
 
-          <div className={isContinuation ? "mt-0" : "mt-conversation-body"}>
-            <Markdown
-              className={cn(
-                "max-w-full text-left text-message text-foreground",
-                emojiOnly &&
-                  "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
-              )}
-              // Only pass the author pubkey for agent-authored messages so
-              // config-nudge cards can authenticate the sender. Uses the
-              // raw event signer (signerPubkey), not a relay-delegated display
-              // author, because the agent itself must have signed the card.
-              configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
-                timelineMessage,
-                isKnownAgentPubkey,
-              )}
-              content={message.content}
-              messageId={message.id}
-              linkPreviewsSuppressed={hasLinkPreviewSuppression(
-                timelineMessage.tags,
-              )}
-              customEmoji={customEmoji}
-              mentionNames={message.mentionNames}
-              mentionPubkeysByName={message.mentionPubkeysByName}
-            />
+          <div
+            className={cn(
+              isContinuation ? "mt-0" : "mt-conversation-body",
+              showMessageBubbles && "w-fit max-w-full",
+            )}
+          >
+            {showMessageBubbles ? (
+              <div
+                className={cn(
+                  "relative w-fit max-w-full bg-muted/50",
+                  MESSAGE_BUBBLE_CONTENT_PADDING_CLASSES,
+                  radiusClass,
+                  getMessageBubbleBottomPaddingClass(reactions.length > 0),
+                )}
+                data-testid="message-body-surface"
+              >
+                {actionBarNode}
+                <Markdown
+                  className={cn(
+                    "message-bubble-markdown max-w-full text-left text-message text-foreground",
+                    emojiOnly &&
+                      "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
+                  )}
+                  configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
+                    timelineMessage,
+                    isKnownAgentPubkey,
+                  )}
+                  content={message.content}
+                  messageId={message.id}
+                  linkPreviewsSuppressed={hasLinkPreviewSuppression(
+                    timelineMessage.tags,
+                  )}
+                  customEmoji={customEmoji}
+                  mentionNames={message.mentionNames}
+                  mentionPubkeysByName={message.mentionPubkeysByName}
+                />
+              </div>
+            ) : (
+              <Markdown
+                className={cn(
+                  "max-w-full text-left text-message text-foreground",
+                  emojiOnly &&
+                    "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
+                )}
+                configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
+                  timelineMessage,
+                  isKnownAgentPubkey,
+                )}
+                content={message.content}
+                messageId={message.id}
+                linkPreviewsSuppressed={hasLinkPreviewSuppression(
+                  timelineMessage.tags,
+                )}
+                customEmoji={customEmoji}
+                mentionNames={message.mentionNames}
+                mentionPubkeysByName={message.mentionPubkeysByName}
+              />
+            )}
             <MessageReactions
               canToggle={canToggleReactions}
               messageId={message.id}
@@ -247,6 +307,7 @@ export function InboxMessageRow({
                 );
               }}
               pending={reactionPending}
+              placement={showMessageBubbles ? "bubble-overlap" : "inline"}
               reactions={reactions}
             />
             {reactionErrorMessage ? (
