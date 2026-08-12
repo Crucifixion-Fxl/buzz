@@ -60,6 +60,9 @@ pub struct SuccessfulSteerDelivery {
 pub struct TaskMeta {
     pub agent_index: usize,
     pub channel_id: Option<Uuid>,
+    /// Membership generation in which this channel task was dispatched.
+    /// Heartbeat tasks have no channel generation.
+    pub membership_generation: Option<u64>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
@@ -704,23 +707,31 @@ impl AgentPool {
         &mut self.task_map
     }
 
-    /// Return whether the current channel task can accept a native steer now.
+    /// Return whether the current-generation channel task can accept a native
+    /// steer now.
+    ///
+    /// Membership generation is part of task ownership: after remove/re-add,
+    /// a still-running task from the prior generation must not accept new work.
     ///
     /// This is a main-loop preflight for edit enrichment: avoid withholding an
     /// edit and performing REST work when the task has no steer transport or
     /// its capacity-one request slot is already occupied. Availability can
     /// still change while enrichment runs, so callers must retain the normal
     /// send-time fallback.
-    pub fn native_steer_available(&self, channel_id: Uuid) -> bool {
+    pub fn native_steer_available(&self, channel_id: Uuid, membership_generation: u64) -> bool {
         self.task_map
             .values()
-            .find(|meta| meta.channel_id == Some(channel_id))
+            .find(|meta| {
+                meta.channel_id == Some(channel_id)
+                    && meta.membership_generation == Some(membership_generation)
+            })
             .and_then(|meta| meta.steer_tx.as_ref())
             .is_some_and(|tx| !tx.is_closed() && tx.capacity() > 0)
     }
 
     /// Try to send a goose-native steer request to the in-flight task for
-    /// `channel_id`.
+    /// `channel_id` in `membership_generation`. A task from an earlier
+    /// remove/re-add generation is treated as completed for this request.
     ///
     /// Returns `Ok(())` if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
@@ -744,12 +755,16 @@ impl AgentPool {
     pub fn send_steer(
         &mut self,
         channel_id: Uuid,
+        membership_generation: u64,
         request: SteerRequest,
     ) -> Result<(), SteerError> {
         let meta = self
             .task_map
             .values_mut()
-            .find(|m| m.channel_id == Some(channel_id))
+            .find(|m| {
+                m.channel_id == Some(channel_id)
+                    && m.membership_generation == Some(membership_generation)
+            })
             .ok_or(SteerError::PromptCompleted)?;
         let tx = meta
             .steer_tx
@@ -4473,6 +4488,43 @@ mod tests {
             args: vec![],
             env: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn native_steer_rejects_task_from_prior_membership_generation() {
+        let channel_id = Uuid::new_v4();
+        let old_generation = 4;
+        let current_generation = 5;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+        pool.task_map_mut().insert(
+            task_id,
+            TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                membership_generation: Some(old_generation),
+                turn_id: "pre-removal-turn".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: Some(steer_tx),
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        assert!(pool.native_steer_available(channel_id, old_generation));
+        assert!(!pool.native_steer_available(channel_id, current_generation));
+
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
+        let request = SteerRequest {
+            prompt_blocks: vec!["post-readd work".into()],
+            ack_tx,
+        };
+        assert!(matches!(
+            pool.send_steer(channel_id, current_generation, request),
+            Err(SteerError::PromptCompleted)
+        ));
+        assert!(steer_rx.try_recv().is_err());
     }
 
     #[test]
