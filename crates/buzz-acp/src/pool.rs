@@ -271,6 +271,10 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    /// Channels whose sessions must be invalidated when a currently checked-out
+    /// agent returns. Unlike current membership, this survives a remove/re-add
+    /// race so a session from the earlier membership epoch cannot be reused.
+    checked_out_session_invalidations: HashMap<usize, HashSet<Uuid>>,
 }
 
 /// Result returned by a completed prompt task.
@@ -624,6 +628,7 @@ impl AgentPool {
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            checked_out_session_invalidations: HashMap::new(),
         }
     }
 
@@ -840,7 +845,23 @@ impl AgentPool {
                 }
             }
         }
+        for meta in self.task_map.values() {
+            self.checked_out_session_invalidations
+                .entry(meta.agent_index)
+                .or_default()
+                .insert(channel_id);
+        }
         count
+    }
+
+    /// Apply and consume membership-epoch invalidations recorded while this
+    /// agent was checked out.
+    pub fn invalidate_checked_out_sessions(&mut self, agent: &mut OwnedAgent) {
+        if let Some(channels) = self.checked_out_session_invalidations.remove(&agent.index) {
+            for channel_id in channels {
+                agent.state.invalidate_channel(&channel_id);
+            }
+        }
     }
 
     /// Idle-path model switch: set `desired_model` on the idle agent for
