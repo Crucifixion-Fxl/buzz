@@ -469,6 +469,7 @@ type MockBridgeOptions = {
     channelId: string;
     messageId?: string | null;
     threadRootId?: string | null;
+    workspaceGeneration?: number;
   }>;
   /**
    * Global agent config returned by `get_global_agent_config`. Defaults to
