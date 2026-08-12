@@ -854,6 +854,12 @@ impl AgentPool {
         count
     }
 
+    /// Discard membership invalidations belonging to an agent ownership that
+    /// terminated without returning its `OwnedAgent` (for example, a panic).
+    pub fn discard_checked_out_session_invalidations(&mut self, agent_index: usize) {
+        self.checked_out_session_invalidations.remove(&agent_index);
+    }
+
     /// Apply and consume membership-epoch invalidations recorded while this
     /// agent was checked out.
     pub fn invalidate_checked_out_sessions(&mut self, agent: &mut OwnedAgent) {
@@ -6505,6 +6511,21 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         // Nothing changed.
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
+    }
+
+    #[test]
+    fn panicked_ownership_invalidations_do_not_reach_reused_slot() {
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let channel_id = Uuid::new_v4();
+        pool.checked_out_session_invalidations
+            .entry(0)
+            .or_default()
+            .insert(channel_id);
+
+        // Panic recovery discards the dead ownership before a replacement can
+        // reuse slot 0.
+        pool.discard_checked_out_session_invalidations(0);
+        assert!(!pool.checked_out_session_invalidations.contains_key(&0));
     }
 
     #[test]

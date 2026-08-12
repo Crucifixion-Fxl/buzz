@@ -4313,6 +4313,9 @@ fn recover_panicked_agent(
         return;
     };
     let i = meta.agent_index;
+    // The panicked ownership can never return its `OwnedAgent`; do not let its
+    // pending membership invalidations leak into a fresh process reusing slot i.
+    pool.discard_checked_out_session_invalidations(i);
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
