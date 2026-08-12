@@ -89,7 +89,7 @@ export function CompactLinkPreviewAttachment({
         {reserveImage ? (
           <AttachmentMedia
             aria-hidden={showImage ? undefined : "true"}
-            className="aspect-auto h-full min-h-0 w-30 min-w-30 max-w-30 self-stretch rounded-xl bg-muted sm:w-34 sm:min-w-34 sm:max-w-34"
+            className="aspect-auto h-full min-h-0 w-30 min-w-30 max-w-30 self-stretch rounded-2xl bg-muted sm:w-34 sm:min-w-34 sm:max-w-34"
             data-link-preview-thumbnail=""
             variant="image"
           >
