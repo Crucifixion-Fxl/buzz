@@ -18,6 +18,10 @@ import {
 } from "@/features/profile/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
+  messageUnitGeneration,
+  updateRetainedMessageUnit,
+} from "@/features/messages/lib/messageUnitGuard";
+import {
   useRelayAgentsQuery,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
@@ -451,6 +455,13 @@ export function UserProfilePopover({
         mergeTimelineCacheMessages(previousMessages, optimisticMessage),
       );
 
+      // Capture the DM unit's generation before the send. If the window is
+      // evicted while `sendChannelMessage` is in flight (the user navigated on
+      // and the resweep dropped this DM), the generation advances and both the
+      // success merge and the error rollback below are dropped — neither an
+      // `(current = []) => …` updater can resurrect the evicted timeline.
+      const generationAtStart = messageUnitGeneration(dm.id);
+
       try {
         await goChannel(dm.id);
         if (isMountedRef.current) {
@@ -458,28 +469,38 @@ export function UserProfilePopover({
         }
 
         const result = await sendChannelMessage(dm.id, content);
-        queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
-          mergeTimelineCacheMessages(current, {
-            id: result.eventId,
-            localKey: optimisticMessage.id,
-            pubkey: identity.pubkey,
-            created_at: result.createdAt,
-            kind: KIND_STREAM_MESSAGE,
-            tags: [
-              ["h", dm.id],
-              ["p", identity.pubkey],
-            ],
-            content: content.trim(),
-            sig: "",
-          }),
+        updateRetainedMessageUnit<RelayEvent[]>(
+          queryClient,
+          queryKey,
+          dm.id,
+          generationAtStart,
+          (current) =>
+            mergeTimelineCacheMessages(current, {
+              id: result.eventId,
+              localKey: optimisticMessage.id,
+              pubkey: identity.pubkey,
+              created_at: result.createdAt,
+              kind: KIND_STREAM_MESSAGE,
+              tags: [
+                ["h", dm.id],
+                ["p", identity.pubkey],
+              ],
+              content: content.trim(),
+              sig: "",
+            }),
         );
       } catch (error) {
-        queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
-          current.filter(
-            (message) =>
-              message.id !== optimisticMessage.id &&
-              message.localKey !== optimisticMessage.localKey,
-          ),
+        updateRetainedMessageUnit<RelayEvent[]>(
+          queryClient,
+          queryKey,
+          dm.id,
+          generationAtStart,
+          (current) =>
+            current.filter(
+              (message) =>
+                message.id !== optimisticMessage.id &&
+                message.localKey !== optimisticMessage.localKey,
+            ),
         );
         throw error;
       }

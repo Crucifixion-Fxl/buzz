@@ -383,16 +383,18 @@ export function useLoadArchivedObserverEvents(
           createdAt: oldestEvent.created_at,
           id: oldestEvent.id,
         };
-        // Fence post-unmount ingest: if the panel unmounted while this page
-        // was in flight, its pin has been released and the channel may already
-        // be evicted. Writing now would resurrect a dead channel as
-        // most-recently-used, silently defeating the archive bound. Skip the
-        // store write; the cursor advance above is harmless (the ref is
-        // discarded on unmount).
-        if (disposedRef.current) {
-          return;
-        }
-        await ingestArchivedObserverEvents(events);
+        // Atomic commit gate: ingest decrypts to a staging buffer, then applies
+        // the whole page synchronously only if this gate reads false at commit
+        // time. It reads true when a channel switch advanced resetGeneration
+        // (including A→B→A) or the panel unmounted (disposedRef) while the page
+        // decrypted — either would otherwise commit stale events onto the live
+        // channel or resurrect an evicted channel as most-recently-used. The
+        // cursor advance above is harmless (the ref is discarded on unmount).
+        await ingestArchivedObserverEvents(events, undefined, () => {
+          return (
+            requestGeneration !== ps.resetGeneration || disposedRef.current
+          );
+        });
       }
 
       // Re-check generation after ingestArchivedObserverEvents: ingestion

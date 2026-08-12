@@ -13,6 +13,20 @@ import {
 } from "./agentManagement";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
+import {
+  clearChannelActivity,
+  getAgentChannelActivity,
+  recordChannelActivity,
+} from "./channelActivitySummary";
+import {
+  compareObserverEvents,
+  isObserverEventAfter,
+  unwrapObserverBatch,
+} from "./observerEventOrdering";
+// Re-export the channel-activity read and the event-ordering helpers off the
+// observer store's public surface; their storage/logic now lives in dedicated
+// modules but callers keep importing them from here.
+export { compareObserverEvents, getAgentChannelActivity, isObserverEventAfter };
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
 import type {
   ConnectionState,
@@ -81,8 +95,14 @@ const archiveEventsByChannel = new Map<string, ObserverEvent[]>();
 // LRU bookkeeping for `archiveEventsByChannel`. `archiveChannelId` maps a
 // composite key back to its channelId (the eviction unit) so the pure policy
 // can group agent entries by channel. `archiveAccessSeq` records the value of
-// `archiveAccessCounter` at each key's most recent read or write, giving a
-// total order for least-recently-used selection.
+// `archiveAccessCounter` at each key's most recent WRITE (a paged load into the
+// archive), giving a total order for least-recently-LOADED selection. This is
+// deliberately a least-recently-*loaded* policy, not least-recently-accessed:
+// reads (`getArchivedChannelEvents`) never touch the sequence, because the read
+// hook pins the channel it reads (`useObserverEvents` calls `pinArchiveChannel`
+// on the same mount), so a channel being read is always pinned and so never an
+// eviction candidate — a read has no reachable state where advancing recency
+// would change the outcome.
 const archiveChannelId = new Map<string, string>();
 const archiveAccessSeq = new Map<string, number>();
 let archiveAccessCounter = 0;
@@ -334,6 +354,7 @@ function observerTag(event: RelayEvent, tagName: string) {
 
 function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
   const key = normalizePubkey(agentPubkey);
+  recordChannelActivity(key, event);
   const current = eventsByAgent.get(key) ?? [];
   if (
     current.some(
@@ -471,64 +492,6 @@ export function getArchivedChannelEvents(
     archiveEventsByChannel.get(archiveChannelKey(agentPubkey, channelId)) ??
     EMPTY_EVENTS
   );
-}
-
-export function compareObserverEvents(
-  left: ObserverEvent,
-  right: ObserverEvent,
-) {
-  const leftTime = Date.parse(left.timestamp);
-  const rightTime = Date.parse(right.timestamp);
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
-    const timeDiff = leftTime - rightTime;
-    if (timeDiff !== 0) {
-      return timeDiff;
-    }
-  }
-
-  return left.seq - right.seq;
-}
-
-/**
- * Returns true if `candidate` sorts strictly after `stored` using the same
- * two-key ordering as `compareObserverEvents`: later timestamp wins; equal
- * timestamp falls back to higher seq.  Extracted so latest-live advancement
- * cannot drift from transcript ordering.
- */
-export function isObserverEventAfter(
-  candidate: { timestamp: string; seq: number },
-  stored: { timestamp: string; seq: number },
-): boolean {
-  const candidateTime = Date.parse(candidate.timestamp);
-  const storedTime = Date.parse(stored.timestamp);
-  if (Number.isFinite(candidateTime) && Number.isFinite(storedTime)) {
-    if (candidateTime !== storedTime) {
-      return candidateTime > storedTime;
-    }
-  }
-  return candidate.seq > stored.seq;
-}
-
-// Observer event kind for a batch envelope wrapping multiple events. The ACP
-// harness publishes one frame per second; everything that accumulated between
-// ticks arrives as `{ kind: "batch", payload: { events: [...] } }` with every
-// inner event carrying its own seq/timestamp. Inner events are processed
-// exactly as unbatched ones; the envelope itself is never stored.
-const OBSERVER_BATCH_KIND = "batch";
-
-// Expand a decrypted observer event into its inner events when it is a batch
-// envelope; a non-batch event passes through as a single-element array. A
-// malformed envelope (no events array) degrades to the envelope itself so a
-// harness bug cannot silently blank the session viewer.
-function unwrapObserverBatch(parsed: ObserverEvent): ObserverEvent[] {
-  if (parsed.kind !== OBSERVER_BATCH_KIND) {
-    return [parsed];
-  }
-  const payload = parsed.payload as { events?: unknown } | null;
-  const events = Array.isArray(payload?.events)
-    ? (payload.events as ObserverEvent[])
-    : null;
-  return events && events.length > 0 ? events : [parsed];
 }
 
 // Per-event processing shared by every event a live frame carries (one for a
@@ -855,14 +818,28 @@ export function useManagedAgentObserverBridge(
  * (e.g. an agent that is stopped but has archived history) are dropped.
  * The caller should ensure the agent is registered before calling.
  *
- * `_decryptFn` is only used by tests to inject a mock decryption function.
- * Production callers must always omit it.
+ * Commit is atomic against channel switches and panel unmounts. Every frame is
+ * decrypted into a staging buffer FIRST (phase 1, the only async work); the
+ * whole page is then applied to the store synchronously under a single
+ * `isStale()` gate (phase 2, no await between the check and the appends). The
+ * caller passes a gate reading `requestGeneration !== resetGeneration ||
+ * disposed`, so a page whose channel was switched away (including A→B→A) or
+ * whose panel unmounted while it decrypted is dropped whole — it can never
+ * commit half a page or resurrect an evicted channel as most-recently-used.
+ *
+ * `_decryptFn` is only used by tests to inject a mock decryption function;
+ * `isStale` defaults to never-stale for direct test calls. Production callers
+ * must omit `_decryptFn` and always pass `isStale`.
  */
 export async function ingestArchivedObserverEvents(
   rawEvents: RelayEvent[],
   _decryptFn: (event: RelayEvent) => Promise<unknown> = decryptObserverEvent,
+  isStale: () => boolean = () => false,
 ): Promise<void> {
-  let archiveChanged = false;
+  // Phase 1: decrypt every frame into a staging buffer. All async work happens
+  // here, before any store write, so no channel switch or unmount can interleave
+  // between a decrypt and its commit.
+  const staged: Array<{ agentPubkey: string; event: ObserverEvent }> = [];
   for (const event of rawEvents) {
     const agentPubkey = observerTag(event, "agent");
     const frame = observerTag(event, "frame");
@@ -878,24 +855,38 @@ export async function ingestArchivedObserverEvents(
     try {
       const parsed = (await _decryptFn(event)) as ObserverEvent;
       for (const inner of unwrapObserverBatch(parsed)) {
-        // Route archived events to the channel-scoped archive window (no cap)
-        // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
-        // Events without a channelId fall through to the live store so they
-        // remain visible in the agent's general transcript.
-        if (inner.channelId) {
-          const added = appendArchivedChannelEvent(
-            agentPubkey,
-            inner.channelId,
-            inner,
-          );
-          if (added) archiveChanged = true;
-        } else {
-          // Live path already calls notifyListeners() inside appendAgentEvent.
-          appendAgentEvent(agentPubkey, inner);
-        }
+        staged.push({ agentPubkey, event: inner });
       }
     } catch {
       // Silently drop decrypt failures — same as live path error handling.
+    }
+  }
+
+  // Phase 2: commit the whole page synchronously under one staleness gate. The
+  // gate is evaluated once, immediately before the first write, with no await
+  // between the check and the appends — so the request that started this page
+  // is still current and every staged event belongs to the live channel. A
+  // stale page is dropped whole rather than committed partially.
+  if (isStale()) {
+    return;
+  }
+
+  let archiveChanged = false;
+  for (const { agentPubkey, event } of staged) {
+    // Route archived events to the channel-scoped archive window (no cap)
+    // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
+    // Events without a channelId fall through to the live store so they remain
+    // visible in the agent's general transcript.
+    if (event.channelId) {
+      const added = appendArchivedChannelEvent(
+        agentPubkey,
+        event.channelId,
+        event,
+      );
+      if (added) archiveChanged = true;
+    } else {
+      // Live path already calls notifyListeners() inside appendAgentEvent.
+      appendAgentEvent(agentPubkey, event);
     }
   }
   // Batch-notify once for the whole page of archive events. appendAgentEvent
@@ -954,6 +945,7 @@ export function resetAgentObserverStore() {
   eventsByAgent.clear();
   transcriptByAgent.clear();
   snapshotByAgent.clear();
+  clearChannelActivity();
   archiveEventsByChannel.clear();
   archiveChannelId.clear();
   archiveAccessSeq.clear();

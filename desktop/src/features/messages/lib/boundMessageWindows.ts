@@ -1,6 +1,8 @@
 import type { Query, QueryClient } from "@tanstack/react-query";
 
 import type { ChannelWindowStore } from "./channelWindowStore";
+import { bumpMessageUnitGeneration } from "./messageUnitGuard";
+import { clearChannelRenderScopedReactionHydration } from "./renderScopedReactions";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   selectMessageWindowEvictionUnits,
@@ -66,13 +68,17 @@ function holdsPendingSend(query: Query): boolean {
 /**
  * Fold classified queries into eviction units. A unit is pinned when ANY of
  * its queries has a mounted observer (the view is on screen — the "none"
- * placeholder channel is inactive and so never pins) or holds a pending send.
- * Recency is the freshest `dataUpdatedAt` across the unit's queries.
+ * placeholder channel is inactive and so never pins), is mid-fetch (its
+ * authoritative window is still loading), or holds a pending send. Recency is
+ * the freshest `dataUpdatedAt` across the unit's queries.
  */
 function foldUnits(queries: ClassifiedQuery[]): Map<string, MessageWindowUnit> {
   const units = new Map<string, MessageWindowUnit>();
   for (const { query, unitId } of queries) {
-    const pinned = query.isActive() || holdsPendingSend(query);
+    const pinned =
+      query.isActive() ||
+      query.state.fetchStatus === "fetching" ||
+      holdsPendingSend(query);
     const recency = query.state.dataUpdatedAt;
     const existing = units.get(unitId);
     if (existing) {
@@ -92,9 +98,13 @@ function foldUnits(queries: ClassifiedQuery[]): Map<string, MessageWindowUnit> {
  * queries. Channels and threads are bounded independently.
  *
  * Removal (not invalidation) is deliberate: a removed key reads back as absent,
- * so `shouldRefreshChannelWindowAfterSubscribe` re-fetches fresh on revisit and
- * a guarded background write (`(current) => !current ? current : merge`) is a
- * no-op that cannot silently resurrect the evicted key.
+ * so `shouldRefreshChannelWindowAfterSubscribe` re-fetches fresh on revisit.
+ * Deferred background writers (reaction/aux hydration, ancestor loads, mutation
+ * success handlers) fire after their own promise settles with no pin, so each
+ * commits through `updateRetainedMessageUnit`; bumping the evicted unit's
+ * generation here fences any such write that is already in flight, and clearing
+ * a channel's reaction-hydration claims lets its revisit re-hydrate from
+ * scratch instead of treating every id as already hydrated.
  */
 export function enforceMessageWindowBounds(queryClient: QueryClient): void {
   const channels: ClassifiedQuery[] = [];
@@ -119,10 +129,41 @@ export function enforceMessageWindowBounds(queryClient: QueryClient): void {
   );
   if (evictChannels.size === 0 && evictThreads.size === 0) return;
 
+  for (const unitId of evictChannels) {
+    bumpMessageUnitGeneration(unitId);
+    clearChannelRenderScopedReactionHydration(unitId);
+  }
+  for (const unitId of evictThreads) {
+    bumpMessageUnitGeneration(unitId);
+  }
+
   for (const { query, unitId, kind } of [...channels, ...threads]) {
     const evict = kind === "channel" ? evictChannels : evictThreads;
     if (evict.has(unitId)) {
       queryClient.getQueryCache().remove(query);
     }
   }
+}
+
+// Per-client coalescing flag for `scheduleMessageWindowSweep`. A WeakSet keyed
+// by the client needs no teardown — a client that is garbage-collected drops
+// its flag with it, and a pending microtask always runs.
+const sweepScheduled = new WeakSet<QueryClient>();
+
+/**
+ * Coalesce a bounds sweep to one run per microtask per client. Both the cache
+ * subscription (a key was added, an observer unmounted, or a fetch settled) and
+ * the send mutation (its optimistic pending-send pin drained) funnel through
+ * here, so every distinct "a pin may have been released" signal shares one
+ * generic resweep — a fetch pin and a mutation pin are not fixed separately.
+ * A channel open adds two keys at once and both land in the same microtask, so
+ * the sweep still runs once.
+ */
+export function scheduleMessageWindowSweep(queryClient: QueryClient): void {
+  if (sweepScheduled.has(queryClient)) return;
+  sweepScheduled.add(queryClient);
+  queueMicrotask(() => {
+    sweepScheduled.delete(queryClient);
+    enforceMessageWindowBounds(queryClient);
+  });
 }

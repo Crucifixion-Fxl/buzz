@@ -32,6 +32,7 @@ import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
 import {
+  getAgentChannelActivity,
   getAgentObserverSnapshot,
   injectObserverEventsForE2E,
   pinObserverAgent,
@@ -250,6 +251,109 @@ describe("observer tiered live-event window — store level", () => {
       snapshotEvents(AGENT).length,
       TAIL,
       "pin state must not survive reset — the agent is unpinned again",
+    );
+  });
+});
+
+describe("observer channel-activity summary — survives tail truncation", () => {
+  // Scope note (Thufir pass-3 sharpening #4 — feed-scope parity for archived
+  // events): the summary is fed ONLY on the live-append path, via
+  // `recordChannelActivity` inside `appendAgentEvent`. Archive-ingested
+  // channel events are intentionally OUTSIDE the summary: on main,
+  // `ingestArchivedObserverEvents` routes channelId-bearing frames to
+  // `appendArchivedChannelEvent` (the channel-scoped archive window), never to
+  // the live `eventsByAgent` store, and `deriveProfileActivityFeedScope` draws
+  // its channel scope only from the live snapshot + transcript. So archive
+  // events never contributed to feed scope, parity holds, and driving these
+  // equivalence cases from the live path (`injectObserverEventsForE2E`) is the
+  // faithful fixture — an archive-fed fixture would test a path the feed scope
+  // never read.
+  beforeEach(() => {
+    resetAgentObserverStore();
+  });
+
+  it("test_channel_dropped_from_tail_survives_in_summary", () => {
+    // chan-old gets a single early event, then chan-new floods past the tail so
+    // chan-old's only event ages out of the (unpinned) event window. The
+    // durable summary must still report chan-old with its original recency —
+    // this is exactly the profile-feed scope truncation would otherwise drop.
+    const oldEvent = makeEvent(1, { channelId: "chan-old" });
+    injectObserverEventsForE2E(AGENT, [oldEvent]);
+    for (let seq = 2; seq <= OVER_TAIL + 1; seq++) {
+      injectObserverEventsForE2E(AGENT, [
+        makeEvent(seq, { channelId: "chan-new" }),
+      ]);
+    }
+
+    const events = snapshotEvents(AGENT);
+    assert.ok(
+      !events.some((e) => e.channelId === "chan-old"),
+      "chan-old's event has aged out of the truncated window",
+    );
+
+    const summary = getAgentChannelActivity(AGENT);
+    assert.equal(
+      summary["chan-old"],
+      Date.parse(oldEvent.timestamp),
+      "the summary retains chan-old's recency after truncation drops its event",
+    );
+    assert.equal(
+      summary["chan-new"],
+      Date.parse(makeEvent(OVER_TAIL + 1).timestamp),
+      "the summary tracks the newest recency for a still-present channel",
+    );
+  });
+
+  it("test_summary_keeps_latest_recency_per_channel", () => {
+    injectObserverEventsForE2E(AGENT, [makeEvent(1, { channelId: "c" })]);
+    injectObserverEventsForE2E(AGENT, [makeEvent(5, { channelId: "c" })]);
+
+    assert.equal(
+      getAgentChannelActivity(AGENT)["c"],
+      Date.parse(makeEvent(5).timestamp),
+      "a later event advances the channel's recency; an earlier one cannot regress it",
+    );
+
+    // A late-arriving older frame for the same channel must not regress it.
+    injectObserverEventsForE2E(AGENT, [makeEvent(3, { channelId: "c" })]);
+    assert.equal(
+      getAgentChannelActivity(AGENT)["c"],
+      Date.parse(makeEvent(5).timestamp),
+      "an out-of-order older event does not regress the recency",
+    );
+  });
+
+  it("test_channelless_and_bad_timestamp_events_do_not_pollute_summary", () => {
+    injectObserverEventsForE2E(AGENT, [makeEvent(1, { channelId: null })]);
+    injectObserverEventsForE2E(AGENT, [
+      makeEvent(2, { channelId: "bad-ts", timestamp: "not-a-date" }),
+    ]);
+
+    const summary = getAgentChannelActivity(AGENT);
+    assert.deepEqual(
+      summary,
+      {},
+      "a channelless event has no channel scope and an unparseable timestamp has no recency — neither enters the summary",
+    );
+  });
+
+  it("test_reset_clears_the_summary", () => {
+    injectObserverEventsForE2E(AGENT, [makeEvent(1, { channelId: "c" })]);
+    assert.equal(Object.keys(getAgentChannelActivity(AGENT)).length, 1);
+
+    resetAgentObserverStore();
+    assert.deepEqual(
+      getAgentChannelActivity(AGENT),
+      {},
+      "the summary must not survive a store reset",
+    );
+  });
+
+  it("test_unknown_agent_reads_empty_summary", () => {
+    assert.deepEqual(
+      getAgentChannelActivity(agentPubkey("z")),
+      {},
+      "an agent with no observed activity reads an empty summary",
     );
   });
 });

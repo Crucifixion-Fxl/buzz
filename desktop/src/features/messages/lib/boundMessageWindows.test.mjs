@@ -10,12 +10,15 @@
  *   - a pending send pins its channel — including the cross-key case where the
  *     optimistic event lands on a non-visible channel-window `liveOverlay`;
  *   - an evicted channel reads back absent → the freshness seam re-fetches;
- *   - a guarded background write cannot resurrect an evicted key (durable
- *     truncation contract).
+ *   - the REAL deferred background writers (reaction hydration, aux backfill)
+ *     cannot resurrect an evicted channel when their fetch settles after the
+ *     resweep drops the unit — the generation fence, exercised end-to-end
+ *     against the production writers and a real eviction, not a synthetic
+ *     stand-in for the guarded updater.
  */
 
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { beforeEach, describe, it, mock } from "node:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
 import {
@@ -33,6 +36,13 @@ import {
   MAX_RETAINED_MESSAGE_CHANNELS,
   MAX_RETAINED_MESSAGE_THREADS,
 } from "./boundMessageWindows.ts";
+import {
+  hydrateRenderScopedReactions,
+  resetRenderScopedReactionHydration,
+} from "./renderScopedReactions.ts";
+import { backfillAuxForMessages } from "./auxBackfill.ts";
+import { resetMessageUnitGenerations } from "./messageUnitGuard.ts";
+import { relayClient } from "@/shared/api/relayClient.ts";
 
 const CHAN_CAP = MAX_RETAINED_MESSAGE_CHANNELS;
 const THREAD_CAP = MAX_RETAINED_MESSAGE_THREADS;
@@ -191,18 +201,120 @@ describe("enforceMessageWindowBounds", () => {
     );
   });
 
-  it("test_guarded_background_write_does_not_resurrect_evicted_channel", () => {
-    for (let i = 0; i <= CHAN_CAP; i += 1) seedChannel(`chan-${i}`, i);
+  it("test_deferred_reaction_hydration_does_not_resurrect_evicted_channel", async () => {
+    // Fill to cap, then open one more channel over cap whose reaction fetch is
+    // in flight when the resweep runs. Forces Paul's ordering: the hydrate
+    // promise settles → the resweep has already evicted the channel → the
+    // deferred merge fires → the generation fence must drop it, leaving BOTH
+    // keys absent (no `(current = []) => …` resurrection).
+    resetMessageUnitGenerations();
+    resetRenderScopedReactionHydration();
+    const evicted = "reaction-evicted";
+    const messageId = "d".repeat(64);
+    for (let i = 0; i < CHAN_CAP; i += 1) seedChannel(`keep-${i}`, i + 100);
+    // Seed the target as the least-recently-updated so it is the one evicted.
+    seedChannel(evicted, 0);
+    client.setQueryData(channelMessagesKey(evicted), [event(messageId, 1)], {
+      updatedAt: 0,
+    });
+
+    let releaseFetch;
+    const hydrate = hydrateRenderScopedReactions({
+      channelId: evicted,
+      messageIds: [messageId],
+      queryClient: client,
+      deps: {
+        fetchReactionEventsForMessages: () =>
+          new Promise((resolve) => {
+            releaseFetch = () =>
+              resolve([
+                event("e".repeat(64), 7, {
+                  tags: [
+                    ["h", "channel"],
+                    ["e", messageId],
+                  ],
+                }),
+              ]);
+          }),
+      },
+    });
+
+    // Resweep while the fetch is still pending: the over-cap channel is evicted.
     enforceMessageWindowBounds(client);
-    // The background live path writes messages with a guarded updater that
-    // no-ops when the key is absent. It must NOT rebuild the evicted key.
-    client.setQueryData(channelMessagesKey("chan-0"), (current) =>
-      !current ? current : [...current, event("live", 999)],
+    assert.equal(hasChannel(evicted), false, "channel evicted mid-fetch");
+
+    // Now the in-flight fetch settles and the deferred merge attempts its write.
+    releaseFetch();
+    await hydrate;
+
+    assert.equal(
+      client.getQueryData(channelMessagesKey(evicted)),
+      undefined,
+      "reaction merge must not resurrect the messages key",
     );
     assert.equal(
-      client.getQueryData(channelMessagesKey("chan-0")),
+      client.getQueryData(channelWindowKey(evicted)),
       undefined,
-      "guarded write must not resurrect an evicted key",
+      "reaction merge must not resurrect the window key",
     );
+  });
+
+  it("test_deferred_aux_backfill_does_not_resurrect_evicted_channel", async () => {
+    // Same ordering for the structural-aux writer: its aux fetch is in flight
+    // when the resweep evicts its channel, so its deferred merge must be fenced.
+    resetMessageUnitGenerations();
+    const evicted = "aux-evicted";
+    const messageId = "a".repeat(64);
+    for (let i = 0; i < CHAN_CAP; i += 1) seedChannel(`keep-${i}`, i + 100);
+    seedChannel(evicted, 0);
+    client.setQueryData(channelMessagesKey(evicted), [event(messageId, 1)], {
+      updatedAt: 0,
+    });
+
+    let releaseAux;
+    const auxByRef = mock.method(
+      relayClient,
+      "fetchAuxEventsByReference",
+      () =>
+        new Promise((resolve) => {
+          releaseAux = () =>
+            resolve([
+              event("f".repeat(64), 40003, {
+                tags: [
+                  ["h", "channel"],
+                  ["e", messageId],
+                ],
+              }),
+            ]);
+        }),
+    );
+    const auxDeletions = mock.method(
+      relayClient,
+      "fetchAuxDeletionEventsForAuxEvents",
+      async () => [],
+    );
+
+    const backfill = backfillAuxForMessages(client, evicted, [
+      event(messageId, 9),
+    ]);
+
+    enforceMessageWindowBounds(client);
+    assert.equal(hasChannel(evicted), false, "channel evicted mid-backfill");
+
+    releaseAux();
+    await backfill;
+
+    assert.equal(
+      client.getQueryData(channelMessagesKey(evicted)),
+      undefined,
+      "aux merge must not resurrect the messages key",
+    );
+    assert.equal(
+      client.getQueryData(channelWindowKey(evicted)),
+      undefined,
+      "aux merge must not resurrect the window key",
+    );
+    auxByRef.mock.restore();
+    auxDeletions.mock.restore();
   });
 });
