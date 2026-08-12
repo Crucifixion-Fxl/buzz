@@ -736,7 +736,10 @@ impl EventQueue {
         self.cancel_reasons.remove(&channel_id);
         self.withheld_native_steer.remove(&channel_id);
         self.sent_native_steers.remove(&channel_id);
-        self.completed_awaiting_native_steer.remove(&channel_id);
+        // If the prompt already completed behind a sent-steer acknowledgement
+        // fence, removing the reservation settles that fence immediately.
+        // Otherwise preserve the genuinely running prompt and its deadline.
+        self.settle_sent_native_steer(channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
@@ -1634,7 +1637,9 @@ fn format_conversation_context(
 /// Original-message routing recovered for a kind:40003 edit event.
 #[derive(Debug, Clone)]
 pub struct ResolvedEdit {
+    /// Event ID of the verified kind:40003 edit target.
     pub target_event_id: String,
+    /// Thread routing tags parsed from the verified target event.
     pub target_thread_tags: ThreadTags,
 }
 
@@ -4213,6 +4218,28 @@ mod tests {
         let drained = q.drain_channel(ch);
         assert_eq!(drained.len(), 1);
         assert!(any_in_flight(&q)); // in-flight unaffected
+    }
+
+    #[test]
+    fn drain_channel_clears_completed_native_steer_fence() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "original turn"));
+        let _batch = q.flush_next().expect("initial prompt in flight");
+
+        let steered = make_edit_queued_created_at(ch, &"cd".repeat(32), 100);
+        let steered_id = steered.event.id.to_hex();
+        q.push(steered);
+        assert!(q.mark_native_steer_pending(ch, &steered_id));
+        q.mark_native_steer_sent(ch, &steered_id);
+        q.mark_complete(ch);
+        assert!(q.is_channel_in_flight(ch));
+
+        q.drain_channel(ch);
+        assert!(
+            !q.is_channel_in_flight(ch),
+            "removal settles a fence whose prompt already completed"
+        );
     }
 
     #[test]
