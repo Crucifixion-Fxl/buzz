@@ -2703,9 +2703,13 @@ async fn tokio_main() -> Result<()> {
                             if is_cancel {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = signal_in_flight_task(
+                                        let fired = signal_current_membership_task(
                                             &mut pool,
                                             buzz_event.channel_id,
+                                            membership_generations
+                                                .get(&buzz_event.channel_id)
+                                                .copied()
+                                                .unwrap_or(0),
                                             ControlSignal::Cancel,
                                         );
                                         if !fired {
@@ -2741,9 +2745,13 @@ async fn tokio_main() -> Result<()> {
                             if is_rotate {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = signal_in_flight_task(
+                                        let fired = signal_current_membership_task(
                                             &mut pool,
                                             buzz_event.channel_id,
+                                            membership_generations
+                                                .get(&buzz_event.channel_id)
+                                                .copied()
+                                                .unwrap_or(0),
                                             ControlSignal::Rotate,
                                         );
                                         if fired {
@@ -2973,9 +2981,13 @@ async fn tokio_main() -> Result<()> {
                                         false
                                     };
                                     if !native_attempted {
-                                        signal_in_flight_task(
+                                        signal_current_membership_task(
                                             &mut pool,
                                             buzz_event.channel_id,
+                                            membership_generations
+                                                .get(&buzz_event.channel_id)
+                                                .copied()
+                                                .unwrap_or(0),
                                             signal,
                                         );
                                     }
@@ -3420,7 +3432,12 @@ async fn tokio_main() -> Result<()> {
                     // front of `queues[channel_id]`, so the cancel
                     // will pick it up as part of the merged batch and
                     // re-prompt the agent.
-                    signal_in_flight_task(&mut pool, channel_id, ControlSignal::Steer);
+                    signal_current_membership_task(
+                        &mut pool,
+                        channel_id,
+                        membership_generation,
+                        ControlSignal::Steer,
+                    );
                 }
                 // After releasing a withheld event, give dispatch a chance
                 // to re-flush. If the prompt is still in flight, the
@@ -3671,14 +3688,41 @@ fn signal_in_flight_task(
     channel_id: uuid::Uuid,
     mode: ControlSignal,
 ) -> bool {
-    let entry = pool
-        .task_map_mut()
-        .values_mut()
-        .find(|m| m.channel_id == Some(channel_id));
+    signal_in_flight_task_matching(pool, channel_id, None, mode)
+}
+
+/// Send a control signal only to a task dispatched in `membership_generation`.
+/// A task left running across remove/re-add belongs to an earlier generation
+/// and must not be cancelled or steered by work from the new membership epoch.
+fn signal_current_membership_task(
+    pool: &mut AgentPool,
+    channel_id: uuid::Uuid,
+    membership_generation: u64,
+    mode: ControlSignal,
+) -> bool {
+    signal_in_flight_task_matching(pool, channel_id, Some(membership_generation), mode)
+}
+
+fn signal_in_flight_task_matching(
+    pool: &mut AgentPool,
+    channel_id: uuid::Uuid,
+    membership_generation: Option<u64>,
+    mode: ControlSignal,
+) -> bool {
+    let entry = pool.task_map_mut().values_mut().find(|meta| {
+        meta.channel_id == Some(channel_id)
+            && membership_generation
+                .is_none_or(|generation| meta.membership_generation == Some(generation))
+    });
 
     if let Some(meta) = entry {
         if let Some(tx) = meta.control_tx.take() {
-            tracing::info!(channel = %channel_id, ?mode, "control signal sent to in-flight task");
+            tracing::info!(
+                channel = %channel_id,
+                membership_generation,
+                ?mode,
+                "control signal sent to in-flight task"
+            );
             let _ = tx.send(mode);
             return true;
         }
@@ -3699,8 +3743,8 @@ fn signal_in_flight_task(
 /// Returns `true` if the native attempt was accepted by the read loop
 /// (capacity-1 mpsc `try_send` succeeded, event withheld synchronously,
 /// ack watcher spawned). On `true` the caller MUST NOT issue the
-/// universal cancel+merge `ControlSignal::Steer` fallback — the watcher
-/// will issue it from the ack arm if the native attempt fails.
+/// universal cancel+merge fallback. If the native attempt fails, the watcher
+/// issues that fallback only to a task from the same membership generation.
 ///
 /// Returns `false` if `pool.send_steer` failed (no in-flight task,
 /// `steer_tx` already full from a prior in-flight steer, or read loop
@@ -3780,7 +3824,16 @@ fn release_prepared_native_steer_fallback(
     typing_channels: &mut HashMap<Uuid, ThreadTags>,
 ) {
     queue.release_native_steer(channel_id, event_id);
-    signal_in_flight_task(pool, channel_id, ControlSignal::Steer);
+    let membership_generation = membership_generations
+        .get(&channel_id)
+        .copied()
+        .unwrap_or(0);
+    signal_current_membership_task(
+        pool,
+        channel_id,
+        membership_generation,
+        ControlSignal::Steer,
+    );
     for (channel_id, thread_tags) in
         dispatch_pending(pool, queue, ctx, membership_generations, last_activity)
     {
@@ -5301,6 +5354,69 @@ mod owner_control_command_tests {
             mode_gate_signal(MultipleEventHandling::OwnerInterrupt, &owner, None).is_none(),
             "owner-interrupt must not fire when the owner is unknown"
         );
+    }
+
+    #[tokio::test]
+    async fn post_readd_signal_does_not_reach_prior_membership_task() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let old_generation = 4;
+        let current_generation = 5;
+        let (old_control_tx, mut old_control_rx) = tokio::sync::oneshot::channel();
+
+        let old_abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            old_abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                membership_generation: Some(old_generation),
+                turn_id: "pre-removal-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(old_control_tx),
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        assert!(!signal_current_membership_task(
+            &mut pool,
+            channel_id,
+            current_generation,
+            ControlSignal::Steer,
+        ));
+        assert!(matches!(
+            old_control_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let (current_control_tx, current_control_rx) = tokio::sync::oneshot::channel();
+        let current_abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            current_abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 1,
+                channel_id: Some(channel_id),
+                membership_generation: Some(current_generation),
+                turn_id: "post-readd-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: Some(current_control_tx),
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        assert!(signal_current_membership_task(
+            &mut pool,
+            channel_id,
+            current_generation,
+            ControlSignal::Steer,
+        ));
+        assert_eq!(current_control_rx.await.unwrap(), ControlSignal::Steer);
+        assert!(matches!(
+            old_control_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]
